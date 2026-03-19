@@ -520,6 +520,18 @@ enum ServerMsg {
     ChannelCreated { name: String },
     ChannelDeleted { name: String },
     EmojiList      { emojis: Vec<CustomEmoji> },
+    DmHistory      { dms: Vec<DmHistoryEntry> },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct DmHistoryEntry {
+    id:        String,
+    from:      String,
+    to:        String,
+    content:   String,
+    timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file:      Option<FileAttachment>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -803,9 +815,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, username: String
 
     // 2. History for #general
     {
-        let messages = state.get_channel_arc("general")
-            .map(|arc| futures::executor::block_on(async { arc.lock().await.clone() }))
-            .unwrap_or_default();
+        let messages = if let Some(arc) = state.get_channel_arc("general") {
+            arc.lock().await.clone()
+        } else {
+            Vec::new()
+        };
         if let Ok(json) = serde_json::to_string(&ServerMsg::History {
             messages, channel: "general".to_string()
         }) {
@@ -844,22 +858,24 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, username: String
         }
     }
 
-    // 6. DM history (every session gets its own copy — frontend deduplicates by id)
+    // 6. DM history — sent as a single batch so the frontend can distinguish
+    //    historical DMs from real-time ones (no spurious beeps / unread counts).
     {
         let dms = db_load_dms(&state.db, &username, 300).await;
-        for dm in dms {
+        let entries: Vec<DmHistoryEntry> = dms.into_iter().map(|dm| {
             let file = dm.file.as_deref()
                 .and_then(|s| serde_json::from_str::<FileAttachment>(s).ok());
-            if let Ok(json) = serde_json::to_string(&ServerMsg::DirectMessage {
+            DmHistoryEntry {
                 id:        dm.id,
                 from:      dm.from_user,
                 to:        dm.to_user,
                 content:   dm.content,
                 timestamp: dm.timestamp,
                 file,
-            }) {
-                let _ = sender.send(Message::Text(json)).await;
             }
+        }).collect();
+        if let Ok(json) = serde_json::to_string(&ServerMsg::DmHistory { dms: entries }) {
+            let _ = sender.send(Message::Text(json)).await;
         }
     }
 
@@ -1133,14 +1149,16 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
         ClientMsg::SwitchChannel { channel } => {
             let channel = sanitize_channel(&channel);
             if channel.is_empty() { return; }
+            let messages = if let Some(arc) = state.get_channel_arc(&channel) {
+                arc.lock().await.clone()
+            } else {
+                Vec::new()
+            };
+            let topic = state.topics.get(&channel).map(|e| e.clone()).unwrap_or_default();
             if let Some(tx) = state.dm_senders.get(session_id) {
-                let messages = state.get_channel_arc(&channel)
-                    .map(|arc| futures::executor::block_on(async { arc.lock().await.clone() }))
-                    .unwrap_or_default();
                 if let Ok(json) = serde_json::to_string(&ServerMsg::History {
                     messages, channel: channel.clone()
                 }) { let _ = tx.send(json); }
-                let topic = state.topics.get(&channel).map(|e| e.clone()).unwrap_or_default();
                 if let Ok(json) = serde_json::to_string(&ServerMsg::TopicChanged {
                     content: topic, channel,
                 }) { let _ = tx.send(json); }

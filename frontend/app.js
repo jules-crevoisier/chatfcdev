@@ -657,24 +657,28 @@ document.addEventListener('visibilitychange', () => {
 // ── WebSocket inbound ────────────────────────────────────────────
 function handleServer(msg) {
   switch (msg.type) {
-    case 'history':
-      // Store all messages grouped by channel
-      channelMessages = new Map();
+    case 'history': {
+      // Replace only the messages for the specific channel received.
+      const histCh = msg.channel || 'general';
+      const histMsgs = [];
       (Array.isArray(msg.messages) ? msg.messages : []).forEach(m => {
-        const ch = m.channel || 'general';
-        if (!channelMessages.has(ch)) channelMessages.set(ch, []);
-        channelMessages.get(ch).push(m);
+        histMsgs.push(m);
       });
-      // Render the active channel
-      renderChannel(activeChannel);
-      scrollToBottom();
+      channelMessages.set(histCh, histMsgs);
+      // Re-render only if this channel is currently active.
+      if (histCh === activeChannel) {
+        renderChannel(activeChannel);
+        scrollToBottom();
+      }
       break;
+    }
     case 'message':         appendMessage(msg.message, true); break;
     case 'system':          systemMsg(msg.content); break;
     case 'users':           renderUsers(msg.online, msg.offline); break;
     case 'reaction':        applyReactions(msg.message_id, msg.reactions); break;
     case 'message_edited':  applyEdit(msg.message_id, msg.content); break;
     case 'message_deleted': applyDelete(msg.message_id); break;
+    case 'dm_history':      handleDmHistory(msg.dms); break;
     case 'direct_message':  handleDmMessage(msg); break;
     case 'topic_changed':   applyTopic(msg.content); break;
     case 'channel_list':    handleChannelList(msg.channels); break;
@@ -764,6 +768,9 @@ function switchChannel(name) {
   channelUnread.set(name, 0);
   renderChannelTabs();
   document.querySelector('.header-channel').textContent = `#${name}`;
+  // Always request history from server so the cache is always fresh.
+  send({ type: 'switch_channel', channel: name });
+  // Show cached messages immediately while waiting for server response.
   renderChannel(name);
   scrollToBottom();
   updateTypingIndicator();
@@ -1295,8 +1302,29 @@ function sendDm() {
   dmInput.value = '';
 }
 
+function handleDmHistory(dms) {
+  if (!Array.isArray(dms)) return;
+  dms.forEach(dm => {
+    if (!dm.id || dmSeenIds.has(dm.id)) return;
+    dmSeenIds.add(dm.id);
+    const partner = dm.from === myUsername ? dm.to : dm.from;
+    const entry = { id: dm.id, from: dm.from, to: dm.to, content: dm.content,
+                    ts: dm.timestamp || now(), file: dm.file || null };
+    if (!dmConvos.has(partner)) dmConvos.set(partner, []);
+    dmConvos.get(partner).push(entry);
+  });
+  // Single sidebar refresh after processing all history (not one per DM).
+  renderUsers(allUsers.online, allUsers.offline);
+  // If a DM panel was already open, refresh it with history.
+  if (activeDm) {
+    dmMessages.innerHTML = '';
+    (dmConvos.get(activeDm) || []).forEach(m => appendDmMessageEl(m, false));
+    dmMessages.scrollTop = dmMessages.scrollHeight;
+  }
+}
+
 function handleDmMessage(msg) {
-  // Deduplicate: history replay on reconnect may re-send already-seen DMs.
+  // Real-time DM — deduplicate in case of reconnect overlap.
   if (msg.id) {
     if (dmSeenIds.has(msg.id)) return;
     dmSeenIds.add(msg.id);
