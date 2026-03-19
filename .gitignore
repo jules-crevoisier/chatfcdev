@@ -1,0 +1,22 @@
+## Rust / build artifacts
+backend/target/
+
+## Node (just au cas où)
+node_modules/
+frontend/node_modules/
+
+## Persistent runtime data (volumes)
+data/
+uploads/
+
+## Secrets / local env
+.env
+.env.*
+
+## OS files
+.DS_Store
+Thumbs.db
+
+## Local archives
+chatfcdev.zip
+chatfcdev_deploy.zip

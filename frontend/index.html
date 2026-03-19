@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ChatFC</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ── LOGIN ─────────────────────────────────────────────────────── -->
+<div id="login-screen">
+  <div class="login-box">
+    <pre class="ascii-logo">
+ ██████╗██╗  ██╗ █████╗ ████████╗███████╗ ██████╗
+██╔════╝██║  ██║██╔══██╗╚══██╔══╝██╔════╝██╔════╝
+██║     ███████║███████║   ██║   █████╗  ██║
+██║     ██╔══██║██╔══██║   ██║   ██╔══╝  ██║
+╚██████╗██║  ██║██║  ██║   ██║   ██║     ╚██████╗
+ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝      ╚═════╝</pre>
+    <div class="login-subtitle">[ connecting to home server ]</div>
+
+    <!-- Auth mode tabs -->
+    <div class="auth-tabs">
+      <button id="tab-login"    class="auth-tab active">[ LOGIN ]</button>
+      <button id="tab-register" class="auth-tab">[ REGISTER ]</button>
+    </div>
+
+    <div class="login-field">
+      <span class="login-prompt">username:~$</span>
+      <input type="text" id="username-input" placeholder="_" maxlength="24" autocomplete="off" autofocus>
+    </div>
+    <div class="login-field">
+      <span class="login-prompt">password:~$</span>
+      <input type="password" id="password-input" placeholder="_" autocomplete="off">
+    </div>
+
+    <div id="auth-error" class="auth-error"></div>
+
+    <button id="connect-btn">[ LOGIN ]</button>
+    <div class="login-hint">Press Enter or click to connect</div>
+  </div>
+</div>
+
+<!-- ── CHAT ───────────────────────────────────────────────────────── -->
+<div id="chat-screen">
+
+  <!-- Sidebar: users -->
+  <div id="sidebar">
+    <div class="sidebar-header">
+      <span>[ ONLINE ]</span>
+      <span id="user-count" class="user-count">0</span>
+    </div>
+
+    <!-- Scrollable area: online + offline users -->
+    <div class="users-container">
+      <ul id="users-list"></ul>
+      <div id="offline-section" style="display:none">
+        <div class="sidebar-section-header">[ OFFLINE ]</div>
+        <ul id="offline-list"></ul>
+      </div>
+    </div>
+
+    <!-- Theme picker dots -->
+    <div class="theme-row">
+      <span class="theme-dot" data-theme=""          style="background:#00ff41" title="Matrix (défaut)"></span>
+      <span class="theme-dot" data-theme="nord"      style="background:#88c0d0" title="Nord"></span>
+      <span class="theme-dot" data-theme="dracula"   style="background:#bd93f9" title="Dracula"></span>
+      <span class="theme-dot" data-theme="monokai"   style="background:#f1fa8c" title="Monokai"></span>
+      <span class="theme-dot" data-theme="solarized" style="background:#268bd2" title="Solarized"></span>
+      <span class="theme-dot" data-theme="synthwave" style="background:#ff2a6d" title="Synthwave"></span>
+    </div>
+
+    <div class="sidebar-footer">
+      ChatFC v1.0
+      <button id="logout-btn" title="Logout">[ logout ]</button>
+    </div>
+  </div>
+
+  <!-- Main area -->
+  <div id="main-chat">
+
+    <!-- DM panel (overlays the chat area when a DM is open) -->
+    <div id="dm-panel" style="display:none">
+      <div id="dm-header">
+        <button id="dm-close" title="Retour au canal">←</button>
+        <span id="dm-title">DM</span>
+        <span id="dm-status"></span>
+      </div>
+      <div id="dm-messages"></div>
+      <div id="dm-input-area">
+        <input type="text" id="dm-input" placeholder="Message…" autocomplete="off" spellcheck="false">
+        <button id="dm-send">SEND ▶</button>
+      </div>
+    </div>
+
+    <!-- Channel tabs bar (browser-style tabs) -->
+    <div id="channel-tabs">
+      <button id="new-channel-btn" class="ch-tab-add" title="Nouveau canal">+</button>
+    </div>
+
+    <div id="chat-header">
+      <span class="header-channel">#general</span>
+      <span class="header-info" id="header-info">no topic set — Ctrl+K pour rechercher</span>
+      <div id="notification-badge" class="notif-badge" style="display:none">
+        🔔 <span id="mention-count">0</span> mention(s)
+      </div>
+    </div>
+
+    <!-- Messages -->
+    <div id="messages" ondragover="event.preventDefault(); this.classList.add('dragging')"
+         ondragleave="this.classList.remove('dragging')"
+         ondrop="handleDrop(event)">
+      <div class="drop-overlay">⬆ Drop files to upload</div>
+    </div>
+
+    <!-- Typing indicator -->
+    <div id="typing-indicator"></div>
+
+    <!-- File staging (shown after picking a file, before sending) -->
+    <div id="file-staging" style="display:none">
+      <div id="staging-preview"></div>
+      <div id="staging-controls">
+        <input type="text" id="staging-caption"
+               placeholder="Ajouter une légende… (optionnel, Enter pour envoyer)"
+               autocomplete="off" spellcheck="false" maxlength="500">
+        <button id="staging-send">Envoyer ▶</button>
+        <button id="staging-cancel" title="Annuler">✕</button>
+      </div>
+    </div>
+
+    <!-- Reply bar (visible when replying) -->
+    <div id="reply-bar" style="display:none">
+      <span class="reply-bar-icon">↩</span>
+      <span id="reply-bar-text"></span>
+      <button id="reply-cancel" type="button" title="Cancel reply">✕</button>
+    </div>
+
+    <!-- Input -->
+    <div id="input-area">
+      <button id="emoji-msg-btn" class="input-icon-btn" title="Emoji">😊</button>
+      <button id="gif-btn" class="input-icon-btn gif-label" title="GIF search">GIF</button>
+      <label for="file-upload" class="attach-btn" title="Attach file (or drag & drop)">📎</label>
+      <input type="file" id="file-upload" multiple style="display:none">
+      <input type="text" id="message-input"
+             placeholder="Type a message… (@user to mention)"
+             autocomplete="off" spellcheck="false">
+      <button id="send-btn">SEND ▶</button>
+    </div>
+
+  </div><!-- /main-chat -->
+
+</div><!-- /chat-screen -->
+
+<!-- Reaction emoji picker (for message reactions) -->
+<div id="emoji-picker" style="display:none">
+  <div id="emoji-grid"></div>
+</div>
+
+<!-- Message emoji picker (insert into text) -->
+<div id="msg-emoji-picker" style="display:none">
+  <input type="text" id="emoji-search" placeholder="Search emoji…" autocomplete="off">
+  <div id="emoji-cats"></div>
+  <div id="emoji-list"></div>
+</div>
+
+<!-- GIF picker -->
+<div id="gif-picker" style="display:none">
+  <input type="text" id="gif-search" placeholder="Search GIFs…" autocomplete="off">
+  <div id="gif-results"></div>
+  <div class="tenor-credit">Powered by <span>Tenor</span></div>
+</div>
+
+<!-- @ autocomplete -->
+<div id="autocomplete" style="display:none"></div>
+
+<!-- Image lightbox -->
+<div id="lightbox" style="display:none" onclick="closeLightbox()">
+  <img id="lightbox-img" alt="">
+  <div class="lightbox-hint">click anywhere to close</div>
+</div>
+
+<!-- Global user search (Ctrl+K) -->
+<div id="search-modal" style="display:none">
+  <div id="search-box">
+    <div class="search-hint">Ctrl+K — Rechercher un utilisateur · Entrée pour ouvrir DM · Échap pour fermer</div>
+    <input type="text" id="search-input" placeholder="Nom d'utilisateur…" autocomplete="off" spellcheck="false">
+    <div id="search-results"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

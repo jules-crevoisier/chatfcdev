@@ -1,0 +1,5 @@
+backend/target/
+.git/
+data/
+uploads/
+*.md
