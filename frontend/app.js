@@ -128,6 +128,7 @@ const connectBtn     = document.getElementById('connect-btn');
 const tabLogin       = document.getElementById('tab-login');
 const tabRegister    = document.getElementById('tab-register');
 const authError      = document.getElementById('auth-error');
+const authForm       = document.getElementById('auth-form');
 const messagesList   = document.getElementById('messages');
 const messageInput   = document.getElementById('message-input');
 const sendBtn        = document.getElementById('send-btn');
@@ -478,9 +479,13 @@ function setAuthMode(mode) {
 function showAuthError(msg) { authError.textContent = msg; authError.style.display = 'block'; }
 function hideAuthError()    { authError.textContent = ''; authError.style.display = 'none'; }
 
-connectBtn.addEventListener('click', handleAuthSubmit);
+if (authForm) {
+  authForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    handleAuthSubmit();
+  });
+}
 usernameInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); passwordInput.focus(); } });
-passwordInput.addEventListener('keydown', e => { if (e.key === 'Enter') handleAuthSubmit(); });
 
 async function handleAuthSubmit() {
   const username = usernameInput.value.trim();
@@ -622,7 +627,7 @@ function handleServer(msg) {
     case 'history':
       // Store all messages grouped by channel
       channelMessages = new Map();
-      msg.messages.forEach(m => {
+      (Array.isArray(msg.messages) ? msg.messages : []).forEach(m => {
         const ch = m.channel || 'general';
         if (!channelMessages.has(ch)) channelMessages.set(ch, []);
         channelMessages.get(ch).push(m);
@@ -647,9 +652,10 @@ function handleServer(msg) {
 
 // ── Channel management ───────────────────────────────────────────
 function handleChannelList(newChannels) {
+  const list = Array.isArray(newChannels) ? newChannels : [];
   // newChannels is [{name, owner?}, ...] from the backend
-  channels = newChannels.map(ch => (typeof ch === 'string' ? ch : ch.name));
-  channelOwners = new Map(newChannels.map(ch =>
+  channels = list.map(ch => (typeof ch === 'string' ? ch : ch.name));
+  channelOwners = new Map(list.map(ch =>
     typeof ch === 'string' ? [ch, null] : [ch.name, ch.owner || null]
   ));
   if (!channels.includes(activeChannel)) {
@@ -1185,12 +1191,14 @@ function applyDelete(msgId) {
 
 // ── Users list ───────────────────────────────────────────────────
 function renderUsers(online, offline) {
-  allUsers = { online, offline };
-  onlineUsers = online;
-  userCount.textContent = online.length;
+  const on = Array.isArray(online) ? online : [];
+  const off = Array.isArray(offline) ? offline : [];
+  allUsers = { online: on, offline: off };
+  onlineUsers = on;
+  userCount.textContent = String(on.length);
 
   usersList.innerHTML = '';
-  online.forEach(u => {
+  on.forEach(u => {
     const li = document.createElement('li');
     const nameSpan = document.createElement('span'); nameSpan.textContent = u;
     li.appendChild(nameSpan);
@@ -1208,10 +1216,10 @@ function renderUsers(online, offline) {
     usersList.appendChild(li);
   });
 
-  if (offline.length > 0) {
+  if (off.length > 0) {
     offlineSection.style.display = 'block';
     offlineList.innerHTML = '';
-    offline.forEach(u => {
+    off.forEach(u => {
       const li = document.createElement('li'); li.textContent = u;
       li.addEventListener('click', () => openDm(u));
       offlineList.appendChild(li);
@@ -1226,7 +1234,7 @@ function openDm(user) {
   activeDm = user;
   dmUnread.set(user, 0);
   dmTitle.textContent = `@${user}`;
-  const isOnline = allUsers.online.includes(user);
+  const isOnline = (Array.isArray(allUsers.online) ? allUsers.online : []).includes(user);
   dmStatus.textContent = isOnline ? '● online' : '○ offline';
   dmStatus.style.color = isOnline ? 'var(--green)' : 'var(--dim)';
   dmMessages.innerHTML = '';

@@ -4,7 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ChatFC</title>
-  <link rel="stylesheet" href="style.css">
+  <!-- Chemins absolus : évite les 404 CSS/JS si l’URL n’est pas exactement à la racine (proxy, sous-chemin, etc.) -->
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%2300ff41'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-size='18' fill='%230a0a0a'%3E%23%3C/text%3E%3C/svg%3E">
 </head>
 <body>
 
@@ -20,25 +22,27 @@
  ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝      ╚═════╝</pre>
     <div class="login-subtitle">[ connecting to home server ]</div>
 
+    <form id="auth-form" autocomplete="on" novalidate>
     <!-- Auth mode tabs -->
     <div class="auth-tabs">
-      <button id="tab-login"    class="auth-tab active">[ LOGIN ]</button>
-      <button id="tab-register" class="auth-tab">[ REGISTER ]</button>
+      <button type="button" id="tab-login"    class="auth-tab active">[ LOGIN ]</button>
+      <button type="button" id="tab-register" class="auth-tab">[ REGISTER ]</button>
     </div>
 
     <div class="login-field">
       <span class="login-prompt">username:~$</span>
-      <input type="text" id="username-input" placeholder="_" maxlength="24" autocomplete="off" autofocus>
+      <input type="text" id="username-input" name="username" placeholder="_" maxlength="24" autocomplete="username" autofocus>
     </div>
     <div class="login-field">
       <span class="login-prompt">password:~$</span>
-      <input type="password" id="password-input" placeholder="_" autocomplete="off">
+      <input type="password" id="password-input" name="password" placeholder="_" autocomplete="current-password">
     </div>
 
     <div id="auth-error" class="auth-error"></div>
 
-    <button id="connect-btn">[ LOGIN ]</button>
+    <button type="submit" id="connect-btn">[ LOGIN ]</button>
     <div class="login-hint">Press Enter or click to connect</div>
+    </form>
   </div>
 </div>
 
@@ -189,6 +193,6 @@
   </div>
 </div>
 
-<script src="app.js"></script>
+<script src="/app.js"></script>
 </body>
 </html>
