@@ -4,9 +4,13 @@ services:
     container_name: chatfc
     restart: unless-stopped
     ports:
-      - "3000:3000"        # change left side to expose on a different host port
+      - "3000:3000"
     volumes:
-      - ./data:/app/data       # users.json — persisted between restarts
-      - ./uploads:/app/uploads # uploaded files
+      - chatfc_data:/app/data
+      - chatfc_uploads:/app/uploads
     environment:
       PORT: "3000"
+
+volumes:
+  chatfc_data:
+  chatfc_uploads:
