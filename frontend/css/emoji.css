@@ -1,0 +1,196 @@
+/* ── Reaction emoji picker ──────────────────────────────────────── */
+#emoji-picker {
+  display: none;
+  position: fixed;
+  z-index: 999;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  padding: 6px 8px;
+  flex-wrap: wrap;
+  gap: 2px;
+  max-width: 280px;
+}
+
+.emoji-btn {
+  background: none;
+  border: none;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 3px;
+  line-height: 1;
+  transition: transform .1s;
+}
+.emoji-btn:hover { transform: scale(1.25); }
+
+/* ── Message emoji picker ──────────────────────────────────────── */
+#msg-emoji-picker {
+  display: none;
+  position: fixed;
+  z-index: 999;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  flex-direction: column;
+  width: 340px;
+  max-height: 350px;
+}
+
+#emoji-search {
+  background: var(--bg3);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 8px 10px;
+  outline: none;
+  width: 100%;
+}
+#emoji-search::placeholder { color: var(--dim); }
+
+#emoji-cats {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.emoji-cat-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 6px 8px;
+  font-size: 16px;
+  cursor: pointer;
+  transition: border-color .1s, background .1s;
+  flex-shrink: 0;
+}
+.emoji-cat-btn:hover  { background: var(--bg3); }
+.emoji-cat-btn.active { border-bottom-color: var(--green); background: rgba(0,255,65,.03); }
+
+#emoji-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  align-content: flex-start;
+}
+
+.pick-emoji-btn {
+  background: none;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 3px;
+  line-height: 1;
+  transition: transform .1s;
+}
+.pick-emoji-btn:hover { transform: scale(1.3); }
+
+/* ── Custom emoji tab ──────────────────────────────────────────── */
+.custom-emoji-tab {
+  padding: 2px 0;
+  width: 100%;
+}
+
+.custom-emoji-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 2px;
+  max-height: 140px;
+  overflow-y: auto;
+  align-content: flex-start;
+}
+
+.custom-emoji-pick-btn {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  padding: 4px;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color .15s, background .15s;
+}
+.custom-emoji-pick-btn:hover { border-color: var(--green); background: var(--bg2); }
+
+.custom-emoji-preview {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  image-rendering: auto;
+}
+
+.custom-emoji-empty {
+  color: var(--dim);
+  font-size: 11px;
+  padding: 8px;
+  width: 100%;
+  text-align: center;
+}
+
+.custom-emoji-sep {
+  border-top: 1px solid var(--border);
+  margin: 6px 0 4px;
+}
+
+.custom-emoji-form {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding: 4px 2px;
+  flex-wrap: wrap;
+}
+
+.custom-emoji-name {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 4px 6px;
+  width: 100px;
+  outline: none;
+}
+.custom-emoji-name:focus { border-color: var(--green); }
+
+.custom-emoji-file-label {
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  color: var(--dim);
+  font-size: 10px;
+  padding: 4px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+  transition: border-color .1s, color .1s;
+  font-family: var(--font);
+}
+.custom-emoji-file-label:hover { border-color: var(--green); color: var(--text); }
+.custom-emoji-file-label input { display: none; }
+
+.custom-emoji-upload-btn {
+  background: var(--bg3);
+  border: 1px solid var(--green);
+  color: var(--green);
+  font-family: var(--font);
+  font-size: 10px;
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .1s, color .1s;
+}
+.custom-emoji-upload-btn:hover { background: var(--green); color: var(--bg); }
+.custom-emoji-upload-btn:disabled { opacity: .4; cursor: default; }
+
+.custom-emoji-status {
+  color: var(--dim);
+  font-size: 10px;
+  padding-left: 4px;
+}

@@ -6,11 +6,10 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - chatfc_data:/app/data
-      - chatfc_uploads:/app/uploads
+      # Dossiers du projet → tu vois la BDD ici : ./data/chatfc.db (pas dans un volume Docker opaque).
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+      # Frontend servi depuis le dépôt (sinon l’image garde une copie figée au build).
+      - ./frontend:/app/frontend:ro
     environment:
       PORT: "3000"
-
-volumes:
-  chatfc_data:
-  chatfc_uploads:

@@ -1,0 +1,75 @@
+/* ── Themes ─────────────────────────────────────────────────────── */
+body.theme-nord {
+  --bg:        #2e3440;
+  --bg2:       #3b4252;
+  --bg3:       #434c5e;
+  --border:    #4c566a;
+  --border2:   #5a6580;
+  --green:     #a3be8c;
+  --cyan:      #88c0d0;
+  --yellow:    #ebcb8b;
+  --red:       #bf616a;
+  --dim:       #90a0ba;
+  --text:      #d8dee9;
+  --text2:     #c5d0e0;
+}
+
+body.theme-dracula {
+  --bg:        #1e1f29;
+  --bg2:       #282a36;
+  --bg3:       #343746;
+  --border:    #44475a;
+  --border2:   #565972;
+  --green:     #50fa7b;
+  --cyan:      #8be9fd;
+  --yellow:    #f1fa8c;
+  --red:       #ff5555;
+  --dim:       #97a3cb;
+  --text:      #f8f8f2;
+  --text2:     #dee1f3;
+}
+
+body.theme-monokai {
+  --bg:        #1a1a1a;
+  --bg2:       #1e1e1e;
+  --bg3:       #272822;
+  --border:    #3a3a3a;
+  --border2:   #4a4a4a;
+  --green:     #a6e22e;
+  --cyan:      #66d9e8;
+  --yellow:    #e6db74;
+  --red:       #f92672;
+  --dim:       #9f9986;
+  --text:      #f8f8f2;
+  --text2:     #deded2;
+}
+
+body.theme-solarized {
+  --bg:        #002b36;
+  --bg2:       #073642;
+  --bg3:       #0d4454;
+  --border:    #0a4858;
+  --border2:   #186475;
+  --green:     #859900;
+  --cyan:      #2aa198;
+  --yellow:    #b58900;
+  --red:       #dc322f;
+  --dim:       #95abb5;
+  --text:      #d5e2e8;
+  --text2:     #b5c8d1;
+}
+
+body.theme-synthwave {
+  --bg:        #0d0221;
+  --bg2:       #130b2e;
+  --bg3:       #1e1046;
+  --border:    #2c1a5e;
+  --border2:   #3d2580;
+  --green:     #72f1b8;
+  --cyan:      #03edf9;
+  --yellow:    #fede00;
+  --red:       #ff2a6d;
+  --dim:       #b091ee;
+  --text:      #f0e8ff;
+  --text2:     #e7cfff;
+}

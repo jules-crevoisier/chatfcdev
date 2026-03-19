@@ -19,8 +19,11 @@ use dashmap::DashMap;
 use futures::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{sqlite::SqliteConnectOptions, Row as SqlxRow, SqlitePool};
-use std::str::FromStr;
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqliteJournalMode},
+    Row as SqlxRow,
+    SqlitePool,
+};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use uuid::Uuid;
@@ -44,9 +47,16 @@ const SPAM_MUTES: &[u64] = &[15, 60, 300, 600];
 // ── SQLite – init & schema ─────────────────────────────────────────────────────
 
 async fn init_db() -> SqlitePool {
-    let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", MESSAGES_DB))
-        .expect("invalid db url")
-        .create_if_missing(true);
+    // Ne pas utiliser `sqlite://data/...` : l’URL interprète `data` comme hôte et ouvre souvent
+    // le mauvais fichier (ex. `/chatfc.db` à la racine) → MP / users « vides » ou non persistés.
+    let db_path = PathBuf::from(MESSAGES_DB);
+    if let Some(parent) = db_path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let opts = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal);
 
     let pool = SqlitePool::connect_with(opts)
         .await
@@ -106,9 +116,14 @@ async fn init_db() -> SqlitePool {
             to_user    TEXT NOT NULL,
             content    TEXT NOT NULL,
             timestamp  TEXT NOT NULL,
+            file       TEXT,
             created_at INTEGER NOT NULL DEFAULT (unixepoch())
         )"
     ).execute(&pool).await.expect("create direct_messages table");
+
+    // Migration: add `file` column for databases created before this column existed.
+    let _ = sqlx::query("ALTER TABLE direct_messages ADD COLUMN file TEXT")
+        .execute(&pool).await;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_dm_participants ON direct_messages(from_user, to_user, created_at)"
@@ -292,9 +307,9 @@ async fn db_load_messages(pool: &SqlitePool, channel: &str, limit: i64) -> Vec<C
     let rows = sqlx::query(
         "SELECT id, channel, username, content, timestamp, reactions, file, reply_to, edited
          FROM (
-             SELECT * FROM messages WHERE channel=?1
-             ORDER BY created_at DESC, rowid DESC LIMIT ?2
-         ) ORDER BY created_at ASC, rowid ASC"
+             SELECT *, rowid AS _rowid FROM messages WHERE channel=?1
+             ORDER BY created_at DESC, _rowid DESC LIMIT ?2
+         ) ORDER BY created_at ASC, _rowid ASC"
     )
     .bind(channel).bind(limit)
     .fetch_all(pool).await.unwrap_or_default();
@@ -359,29 +374,58 @@ struct DmRecord {
     file:      Option<String>, // JSON-serialized FileAttachment
 }
 
-async fn db_save_dm(pool: &SqlitePool, dm: &DmRecord) {
-    let _ = sqlx::query(
-        "INSERT OR IGNORE INTO direct_messages (id, from_user, to_user, content, timestamp, file)
+async fn db_save_dm(pool: &SqlitePool, dm: &DmRecord) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO direct_messages (id, from_user, to_user, content, timestamp, file)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
     )
     .bind(&dm.id).bind(&dm.from_user).bind(&dm.to_user)
     .bind(&dm.content).bind(&dm.timestamp).bind(&dm.file)
-    .execute(pool).await;
+    .execute(pool).await?;
+    Ok(())
 }
 
 /// Load the last `limit` DMs involving `username` (as sender or recipient),
 /// returned in chronological order.
 async fn db_load_dms(pool: &SqlitePool, username: &str, limit: i64) -> Vec<DmRecord> {
+    let result = sqlx::query(
+        "SELECT id, from_user, to_user, content, timestamp, file
+         FROM (
+             SELECT *, rowid AS _rowid FROM direct_messages
+             WHERE from_user=?1 OR to_user=?1
+             ORDER BY created_at DESC, _rowid DESC
+             LIMIT ?2
+         ) ORDER BY created_at ASC, _rowid ASC"
+    )
+    .bind(username).bind(limit)
+    .fetch_all(pool).await;
+    let rows = match result {
+        Ok(r) => r,
+        Err(e) => { tracing::error!("db_load_dms QUERY FAILED for {}: {}", username, e); return vec![]; }
+    };
+
+    rows.into_iter().filter_map(|row| Some(DmRecord {
+        id:        row.try_get("id").ok()?,
+        from_user: row.try_get("from_user").ok()?,
+        to_user:   row.try_get("to_user").ok()?,
+        content:   row.try_get("content").ok()?,
+        timestamp: row.try_get("timestamp").ok()?,
+        file:      row.try_get("file").ok().flatten(),
+    })).collect()
+}
+
+/// All DMs between two users, newest-first window then chronological, up to `limit` rows.
+async fn db_load_dm_thread(pool: &SqlitePool, user_a: &str, user_b: &str, limit: i64) -> Vec<DmRecord> {
     let rows = sqlx::query(
         "SELECT id, from_user, to_user, content, timestamp, file
          FROM (
-             SELECT * FROM direct_messages
-             WHERE from_user=?1 OR to_user=?1
-             ORDER BY created_at DESC, rowid DESC
-             LIMIT ?2
-         ) ORDER BY created_at ASC, rowid ASC"
+             SELECT *, rowid AS _rowid FROM direct_messages
+             WHERE (from_user=?1 AND to_user=?2) OR (from_user=?2 AND to_user=?1)
+             ORDER BY created_at DESC, _rowid DESC
+             LIMIT ?3
+         ) ORDER BY created_at ASC, _rowid ASC"
     )
-    .bind(username).bind(limit)
+    .bind(user_a).bind(user_b).bind(limit)
     .fetch_all(pool).await.unwrap_or_default();
 
     rows.into_iter().filter_map(|row| Some(DmRecord {
@@ -499,6 +543,12 @@ enum ClientMsg {
         channel: String,
     },
     SwitchChannel { channel: String },
+    /// Refresh DM thread from DB for this session (same idea as SwitchChannel).
+    #[serde(rename = "load_dm")]
+    LoadDm { partner: String },
+    /// Heartbeat from client — ignored, but must parse so we don't drop the message silently.
+    #[serde(rename = "ping")]
+    Ping,
     CreateChannel { name: String },
     DeleteChannel { name: String },
 }
@@ -521,6 +571,9 @@ enum ServerMsg {
     ChannelDeleted { name: String },
     EmojiList      { emojis: Vec<CustomEmoji> },
     DmHistory      { dms: Vec<DmHistoryEntry> },
+    /// Full thread with one partner — replaces client cache for that partner (like History per channel).
+    #[serde(rename = "dm_thread")]
+    DmThread       { partner: String, dms: Vec<DmHistoryEntry> },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -532,6 +585,19 @@ struct DmHistoryEntry {
     timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     file:      Option<FileAttachment>,
+}
+
+fn dm_record_to_history_entry(dm: DmRecord) -> DmHistoryEntry {
+    let file = dm.file.as_deref()
+        .and_then(|s| serde_json::from_str::<FileAttachment>(s).ok());
+    DmHistoryEntry {
+        id:        dm.id,
+        from:      dm.from_user,
+        to:        dm.to_user,
+        content:   dm.content,
+        timestamp: dm.timestamp,
+        file,
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -627,6 +693,17 @@ impl AppState {
 }
 
 // ── Session helpers ────────────────────────────────────────────────────────────
+
+/// Map sanitized input to the exact username key stored in `auth` (case-sensitive store, tolerant lookup).
+fn resolve_auth_username(auth: &UserStore, sanitized: &str) -> Option<String> {
+    if sanitized.is_empty() {
+        return None;
+    }
+    if auth.contains_key(sanitized) {
+        return Some(sanitized.to_string());
+    }
+    auth.keys().find(|k| k.eq_ignore_ascii_case(sanitized)).cloned()
+}
 
 fn send_to_user(state: &Arc<AppState>, username: &str, msg: &str) {
     if let Some(sessions) = state.user_sessions.get(username) {
@@ -862,18 +939,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, username: String
     //    historical DMs from real-time ones (no spurious beeps / unread counts).
     {
         let dms = db_load_dms(&state.db, &username, 300).await;
-        let entries: Vec<DmHistoryEntry> = dms.into_iter().map(|dm| {
-            let file = dm.file.as_deref()
-                .and_then(|s| serde_json::from_str::<FileAttachment>(s).ok());
-            DmHistoryEntry {
-                id:        dm.id,
-                from:      dm.from_user,
-                to:        dm.to_user,
-                content:   dm.content,
-                timestamp: dm.timestamp,
-                file,
-            }
-        }).collect();
+        tracing::info!("dm_history for {}: {} records", username, dms.len());
+        let entries: Vec<DmHistoryEntry> = dms.into_iter().map(dm_record_to_history_entry).collect();
         if let Ok(json) = serde_json::to_string(&ServerMsg::DmHistory { dms: entries }) {
             let _ = sender.send(Message::Text(json)).await;
         }
@@ -886,16 +953,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, username: String
     }
 
     // Task: broadcast + DM → client
+    // `biased`: always drain session-specific (dm_rx) first so load_dm / switch_channel answers
+    // are not delayed behind a busy public broadcast channel (same class of bug as stale history).
     let mut send_task = tokio::spawn(async move {
         loop {
             tokio::select! {
-                result = rx.recv() => match result {
-                    Ok(msg) => { if sender.send(Message::Text(msg)).await.is_err() { break; } }
-                    Err(_)  => break,
-                },
+                biased;
                 dm_msg = dm_rx.recv() => match dm_msg {
                     Some(msg) => { if sender.send(Message::Text(msg)).await.is_err() { break; } }
                     None      => break,
+                },
+                result = rx.recv() => match result {
+                    Ok(msg) => { if sender.send(Message::Text(msg)).await.is_err() { break; } }
+                    Err(_)  => break,
                 },
             }
         }
@@ -938,9 +1008,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, username: String
 }
 
 async fn handle_client_message(text: &str, username: &str, session_id: &str, state: &Arc<AppState>) {
-    let Ok(client_msg) = serde_json::from_str::<ClientMsg>(text) else { return; };
+    let Ok(client_msg) = serde_json::from_str::<ClientMsg>(text) else {
+        tracing::debug!(len = text.len(), "ignored non-json or unknown client message");
+        return;
+    };
 
     match client_msg {
+        ClientMsg::Ping => {}
+
         // ── Public message ─────────────────────────────────────────
         ClientMsg::Message { content, reply_to, channel } => {
             if content.is_empty() || content.len() > 2000 { return; }
@@ -1085,8 +1160,10 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
             let to_clean: String = to.chars()
                 .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
                 .take(24).collect();
-            if to_clean.is_empty() || to_clean == username { return; }
-            { let auth = state.auth.lock().await; if !auth.contains_key(&to_clean) { return; } }
+            let auth = state.auth.lock().await;
+            let Some(to_canonical) = resolve_auth_username(&auth, &to_clean) else { return; };
+            drop(auth);
+            if to_canonical == username { return; }
 
             let dm_id  = Uuid::new_v4().to_string();
             let ts     = chrono::Local::now().format("%H:%M").to_string();
@@ -1095,27 +1172,34 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
             let record = DmRecord {
                 id:        dm_id.clone(),
                 from_user: username.to_string(),
-                to_user:   to_clean.clone(),
+                to_user:   to_canonical.clone(),
                 content:   content.clone(),
                 timestamp: ts.clone(),
                 file:      file_json,
             };
 
-            // Persist first — then deliver in real-time to online sessions.
-            let db = state.db.clone(); let rec = record.clone();
-            tokio::spawn(async move { db_save_dm(&db, &rec).await; });
+            if let Err(e) = db_save_dm(&state.db, &record).await {
+                tracing::error!("db_save_dm FAILED for id={}: {}", record.id, e);
+                let json = serde_json::to_string(&ServerMsg::System {
+                    content: "❌ Impossible d'enregistrer le message privé. Réessaie.".to_string(),
+                })
+                .unwrap_or_default();
+                send_to_user(state, username, &json);
+                return;
+            }
 
             let dm_json = match serde_json::to_string(&ServerMsg::DirectMessage {
                 id:        dm_id,
                 from:      username.to_string(),
-                to:        to_clean.clone(),
+                to:        to_canonical.clone(),
                 content,
                 timestamp: ts,
                 file,
             }) { Ok(j) => j, Err(_) => return };
 
+            tracing::info!("db_save_dm OK: id={} from={} to={}", record.id, record.from_user, record.to_user);
             // Deliver to recipient if online (offline users will get it from DB on next connect).
-            send_to_user(state, &to_clean, &dm_json);
+            send_to_user(state, &to_canonical, &dm_json);
             // Echo to all sessions of the sender (other tabs see it too).
             send_to_user(state, username, &dm_json);
         }
@@ -1162,6 +1246,37 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
                 if let Ok(json) = serde_json::to_string(&ServerMsg::TopicChanged {
                     content: topic, channel,
                 }) { let _ = tx.send(json); }
+            }
+        }
+
+        // ── Load DM thread from DB (to requesting session only) ─────
+        ClientMsg::LoadDm { partner } => {
+            let partner_clean: String = partner.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                .take(24).collect();
+            let auth = state.auth.lock().await;
+            let Some(partner_canonical) = resolve_auth_username(&auth, &partner_clean) else {
+                let json = serde_json::to_string(&ServerMsg::System {
+                    content: "❌ Utilisateur introuvable pour les messages privés.".to_string(),
+                })
+                .unwrap_or_default();
+                drop(auth);
+                send_to_user(state, username, &json);
+                return;
+            };
+            drop(auth);
+            if partner_canonical == username { return; }
+            let dms = db_load_dm_thread(&state.db, username, &partner_canonical, 500).await;
+            let entries: Vec<DmHistoryEntry> = dms.into_iter().map(dm_record_to_history_entry).collect();
+            let Some(tx) = state.dm_senders.get(session_id) else {
+                tracing::warn!("load_dm: no dm sender for session {}", session_id);
+                return;
+            };
+            if let Ok(json) = serde_json::to_string(&ServerMsg::DmThread {
+                partner: partner_canonical,
+                dms: entries,
+            }) {
+                let _ = tx.send(json);
             }
         }
 
@@ -1337,4 +1452,25 @@ async fn upload_handler(
         })));
     }
     Err((StatusCode::BAD_REQUEST, "No file in request".to_string()))
+}
+
+#[cfg(test)]
+mod wire_format_tests {
+    use super::{ClientMsg, ServerMsg};
+
+    #[test]
+    fn client_parses_load_dm_and_ping() {
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"load_dm","partner":"alice"}"#).unwrap();
+        assert!(matches!(m, ClientMsg::LoadDm { .. }));
+        let p: ClientMsg = serde_json::from_str(r#"{"type":"ping"}"#).unwrap();
+        assert!(matches!(p, ClientMsg::Ping));
+    }
+
+    #[test]
+    fn server_dm_thread_json_tag() {
+        let m = ServerMsg::DmThread { partner: "bob".into(), dms: vec![] };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("\"type\":\"dm_thread\""), "{s}");
+        assert!(s.contains("\"partner\":\"bob\""), "{s}");
+    }
 }

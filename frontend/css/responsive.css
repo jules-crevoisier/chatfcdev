@@ -1,0 +1,25 @@
+/* ── Mobile ─────────────────────────────────────────────────────── */
+@media (max-width: 620px) {
+  #chat-screen { flex-direction: column; }
+  #sidebar {
+    width: 100%;
+    max-height: 120px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    flex-direction: row;
+  }
+  .sidebar-header { writing-mode: horizontal-tb; }
+  #users-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px 8px;
+  }
+  #users-list li { padding: 2px 6px; font-size: 11px; }
+  .theme-row { display: none; }
+  .sidebar-footer { padding: 4px 6px; }
+  #offline-section { display: none !important; }
+
+  .ascii-logo { font-size: 5px; }
+  .login-box { padding: 20px; }
+}

@@ -1,0 +1,39 @@
+/* ── Reset & base ───────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #0a0a0a;
+  --bg2:       #0d0d0d;
+  --bg3:       #111111;
+  --border:    #242424;
+  --border2:   #2e2e2e;
+  --green:     #00ff41;
+  --cyan:      #7ecfcf;
+  --yellow:    #ffd700;
+  --red:       #ff4444;
+  --dim:       #555;
+  --text:      #b8b8b8;
+  --text2:     #888;
+  --font:      'Courier New', Courier, monospace;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+:where(button, a, input, textarea, select, label, [tabindex]):focus-visible {
+  outline: 2px solid var(--yellow);
+  outline-offset: 2px;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar              { width: 6px; height: 6px; }
+::-webkit-scrollbar-track        { background: var(--bg); }
+::-webkit-scrollbar-thumb        { background: var(--border2); }
+::-webkit-scrollbar-thumb:hover  { background: #3a3a3a; }
