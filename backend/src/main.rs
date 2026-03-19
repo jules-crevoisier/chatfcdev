@@ -99,6 +99,25 @@ async fn init_db() -> SqlitePool {
         "CREATE INDEX IF NOT EXISTS idx_msg_channel_time ON messages(channel, created_at)"
     ).execute(&pool).await.expect("create index");
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS direct_messages (
+            id         TEXT PRIMARY KEY,
+            from_user  TEXT NOT NULL,
+            to_user    TEXT NOT NULL,
+            content    TEXT NOT NULL,
+            timestamp  TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch())
+        )"
+    ).execute(&pool).await.expect("create direct_messages table");
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_dm_participants ON direct_messages(from_user, to_user, created_at)"
+    ).execute(&pool).await.expect("create dm index");
+
+    // Migration: add `file` column to direct_messages for existing databases.
+    let _ = sqlx::query("ALTER TABLE direct_messages ADD COLUMN file TEXT")
+        .execute(&pool).await;
+
     pool
 }
 
@@ -328,6 +347,53 @@ async fn db_delete_message(pool: &SqlitePool, msg_id: &str) {
         .bind(msg_id).execute(pool).await;
 }
 
+// ── SQLite – direct messages ───────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct DmRecord {
+    id:        String,
+    from_user: String,
+    to_user:   String,
+    content:   String,
+    timestamp: String,
+    file:      Option<String>, // JSON-serialized FileAttachment
+}
+
+async fn db_save_dm(pool: &SqlitePool, dm: &DmRecord) {
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO direct_messages (id, from_user, to_user, content, timestamp, file)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+    )
+    .bind(&dm.id).bind(&dm.from_user).bind(&dm.to_user)
+    .bind(&dm.content).bind(&dm.timestamp).bind(&dm.file)
+    .execute(pool).await;
+}
+
+/// Load the last `limit` DMs involving `username` (as sender or recipient),
+/// returned in chronological order.
+async fn db_load_dms(pool: &SqlitePool, username: &str, limit: i64) -> Vec<DmRecord> {
+    let rows = sqlx::query(
+        "SELECT id, from_user, to_user, content, timestamp, file
+         FROM (
+             SELECT * FROM direct_messages
+             WHERE from_user=?1 OR to_user=?1
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT ?2
+         ) ORDER BY created_at ASC, rowid ASC"
+    )
+    .bind(username).bind(limit)
+    .fetch_all(pool).await.unwrap_or_default();
+
+    rows.into_iter().filter_map(|row| Some(DmRecord {
+        id:        row.try_get("id").ok()?,
+        from_user: row.try_get("from_user").ok()?,
+        to_user:   row.try_get("to_user").ok()?,
+        content:   row.try_get("content").ok()?,
+        timestamp: row.try_get("timestamp").ok()?,
+        file:      row.try_get("file").ok().flatten(),
+    })).collect()
+}
+
 // ── Channel helpers ────────────────────────────────────────────────────────────
 
 fn sanitize_channel(name: &str) -> String {
@@ -422,7 +488,7 @@ enum ClientMsg {
     },
     EditMessage   { message_id: String, content: String },
     DeleteMessage { message_id: String },
-    DirectMessage { to: String, content: String },
+    DirectMessage { to: String, content: String, #[serde(default)] file: Option<FileAttachment> },
     SetTopic {
         content: String,
         #[serde(default = "default_channel")]
@@ -447,7 +513,7 @@ enum ServerMsg {
     Reaction     { message_id: String, reactions: HashMap<String, Vec<String>> },
     MessageEdited  { message_id: String, content: String },
     MessageDeleted { message_id: String },
-    DirectMessage  { from: String, to: String, content: String },
+    DirectMessage  { id: String, from: String, to: String, content: String, timestamp: String, #[serde(skip_serializing_if = "Option::is_none")] file: Option<FileAttachment> },
     TopicChanged   { content: String, channel: String },
     Typing         { username: String, channel: String },
     ChannelList    { channels: Vec<ChannelInfo> },
@@ -477,7 +543,6 @@ struct AppState {
     dm_senders: DashMap<String, mpsc::UnboundedSender<String>>,
     /// username → active session IDs (multi-tab / multi-device).
     user_sessions: DashMap<String, Vec<String>>,
-    dm_queue: DashMap<String, Vec<String>>,
     topics: DashMap<String, String>,
     channel_owners: DashMap<String, String>,
     /// In-memory emoji list (source of truth is SQLite).
@@ -529,7 +594,6 @@ impl AppState {
             auth: Mutex::new(auth),
             dm_senders: DashMap::new(),
             user_sessions: DashMap::new(),
-            dm_queue: DashMap::new(),
             topics,
             channel_owners,
             emojis: Mutex::new(emojis),
@@ -780,11 +844,27 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, username: String
         }
     }
 
-    // 6. Drain DM queue + announce (first session only)
-    if is_first_session {
-        if let Some((_, queued)) = state.dm_queue.remove(&username) {
-            for msg in queued { let _ = sender.send(Message::Text(msg)).await; }
+    // 6. DM history (every session gets its own copy — frontend deduplicates by id)
+    {
+        let dms = db_load_dms(&state.db, &username, 300).await;
+        for dm in dms {
+            let file = dm.file.as_deref()
+                .and_then(|s| serde_json::from_str::<FileAttachment>(s).ok());
+            if let Ok(json) = serde_json::to_string(&ServerMsg::DirectMessage {
+                id:        dm.id,
+                from:      dm.from_user,
+                to:        dm.to_user,
+                content:   dm.content,
+                timestamp: dm.timestamp,
+                file,
+            }) {
+                let _ = sender.send(Message::Text(json)).await;
+            }
         }
+    }
+
+    // 7. Announce (first session only)
+    if is_first_session {
         broadcast_system(&state, format!("{} joined the chat", username));
         broadcast_users(&state).await;
     }
@@ -977,8 +1057,10 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
         }
 
         // ── Direct message ─────────────────────────────────────────
-        ClientMsg::DirectMessage { to, content } => {
-            if content.is_empty() || content.len() > 2000 { return; }
+        ClientMsg::DirectMessage { to, content, file } => {
+            // Require at least some content or a file attachment.
+            if content.is_empty() && file.is_none() { return; }
+            if content.len() > 2000 { return; }
 
             if let Some(secs) = check_spam(state, username).await {
                 notify_spam(state, username, secs); return;
@@ -990,13 +1072,35 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
             if to_clean.is_empty() || to_clean == username { return; }
             { let auth = state.auth.lock().await; if !auth.contains_key(&to_clean) { return; } }
 
+            let dm_id  = Uuid::new_v4().to_string();
+            let ts     = chrono::Local::now().format("%H:%M").to_string();
+            let file_json = file.as_ref()
+                .and_then(|f| serde_json::to_string(f).ok());
+            let record = DmRecord {
+                id:        dm_id.clone(),
+                from_user: username.to_string(),
+                to_user:   to_clean.clone(),
+                content:   content.clone(),
+                timestamp: ts.clone(),
+                file:      file_json,
+            };
+
+            // Persist first — then deliver in real-time to online sessions.
+            let db = state.db.clone(); let rec = record.clone();
+            tokio::spawn(async move { db_save_dm(&db, &rec).await; });
+
             let dm_json = match serde_json::to_string(&ServerMsg::DirectMessage {
-                from: username.to_string(), to: to_clean.clone(), content,
+                id:        dm_id,
+                from:      username.to_string(),
+                to:        to_clean.clone(),
+                content,
+                timestamp: ts,
+                file,
             }) { Ok(j) => j, Err(_) => return };
 
-            let target_online = state.user_sessions.get(&to_clean).map(|s| !s.is_empty()).unwrap_or(false);
-            if target_online { send_to_user(state, &to_clean, &dm_json); }
-            else { state.dm_queue.entry(to_clean).or_default().push(dm_json.clone()); }
+            // Deliver to recipient if online (offline users will get it from DB on next connect).
+            send_to_user(state, &to_clean, &dm_json);
+            // Echo to all sessions of the sender (other tabs see it too).
             send_to_user(state, username, &dm_json);
         }
 

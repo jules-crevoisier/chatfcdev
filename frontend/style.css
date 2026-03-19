@@ -481,6 +481,31 @@ html, body {
 
 .dm-mine .dm-msg-user { color: var(--green); }
 
+.dm-msg-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.dm-msg-image {
+  max-width: 280px;
+  max-height: 200px;
+  border-radius: 4px;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  margin-top: 2px;
+}
+
+.dm-msg-file-link {
+  color: var(--green);
+  text-decoration: none;
+  font-size: 13px;
+  word-break: break-all;
+}
+.dm-msg-file-link:hover { text-decoration: underline; }
+
 #dm-input-area {
   display: flex;
   gap: 6px;

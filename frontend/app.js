@@ -89,6 +89,8 @@ let acIndex         = -1;
 let emojiTarget     = null;
 let activeMsgEmoji  = false;
 let activeGif       = false;
+let emojiActiveInput = null; // which input the emoji picker targets (messageInput or dmInput)
+let gifContext = 'channel'; // 'channel' or 'dm'
 let currentEmojiCat = 0;
 let gifDebounce     = null;
 let replyingTo      = null;
@@ -98,9 +100,10 @@ let heartbeatTimer  = null;
 let intentionalDisc = false;
 
 // DM state
-let activeDm = null;
-let dmConvos = new Map();
-let dmUnread = new Map();
+let activeDm   = null;
+let dmConvos   = new Map();   // partner → [{id, from, to, content, ts}]
+let dmUnread   = new Map();
+let dmSeenIds  = new Set();   // deduplication: prevent double-display from history + real-time
 
 // File staging state
 let stagedFile = null;  // { file: File, objectUrl?: string }
@@ -162,6 +165,9 @@ const dmStatus       = document.getElementById('dm-status');
 const dmMessages     = document.getElementById('dm-messages');
 const dmInput        = document.getElementById('dm-input');
 const dmSend         = document.getElementById('dm-send');
+const dmEmojiBtn     = document.getElementById('dm-emoji-btn');
+const dmGifBtn       = document.getElementById('dm-gif-btn');
+const dmFileUpload   = document.getElementById('dm-file-upload');
 const searchModal    = document.getElementById('search-modal');
 const searchInput    = document.getElementById('search-input');
 const searchResults  = document.getElementById('search-results');
@@ -203,8 +209,8 @@ EMOJIS.forEach(em => {
 // ── Close overlays on outside click ─────────────────────────────
 document.addEventListener('click', e => {
   if (!emojiPicker.contains(e.target))  hideEmojiPicker();
-  if (!msgEmojiPicker.contains(e.target) && e.target !== emojiMsgBtn) closeMsgEmojiPicker();
-  if (!gifPicker.contains(e.target)     && e.target !== gifBtn)       closeGifPicker();
+  if (!msgEmojiPicker.contains(e.target) && e.target !== emojiMsgBtn && e.target !== dmEmojiBtn) closeMsgEmojiPicker();
+  if (!gifPicker.contains(e.target)     && e.target !== gifBtn       && e.target !== dmGifBtn)   closeGifPicker();
   if (!autocomplete.contains(e.target)  && e.target !== messageInput) hideAC();
 });
 
@@ -252,7 +258,11 @@ function renderEmojiList(emojis) {
     const btn = document.createElement('button');
     btn.className   = 'pick-emoji-btn';
     btn.textContent = em;
-    btn.addEventListener('click', () => { insertAtCursor(messageInput, em); messageInput.focus(); });
+    btn.addEventListener('click', () => {
+      const target = emojiActiveInput || messageInput;
+      insertAtCursor(target, em);
+      target.focus();
+    });
     emojiListEl.appendChild(btn);
   });
 }
@@ -288,8 +298,9 @@ function renderCustomEmojiList(filter = '') {
       img.className = 'custom-emoji-preview';
       btn.appendChild(img);
       btn.addEventListener('click', () => {
-        insertAtCursor(messageInput, `:${e.name}:`);
-        messageInput.focus();
+        const target = emojiActiveInput || messageInput;
+        insertAtCursor(target, `:${e.name}:`);
+        target.focus();
       });
       grid.appendChild(btn);
     });
@@ -383,12 +394,21 @@ emojiMsgBtn.addEventListener('click', e => {
   e.stopPropagation();
   if (activeMsgEmoji) { closeMsgEmojiPicker(); return; }
   closeGifPicker();
-  openMsgEmojiPicker();
+  emojiActiveInput = messageInput;
+  openMsgEmojiPicker(emojiMsgBtn);
 });
 
-function openMsgEmojiPicker() {
+dmEmojiBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  if (activeMsgEmoji) { closeMsgEmojiPicker(); return; }
+  closeGifPicker();
+  emojiActiveInput = dmInput;
+  openMsgEmojiPicker(dmEmojiBtn);
+});
+
+function openMsgEmojiPicker(anchorBtn = emojiMsgBtn) {
   activeMsgEmoji = true;
-  positionAboveInput(msgEmojiPicker, emojiMsgBtn);
+  positionAboveInput(msgEmojiPicker, anchorBtn);
   emojiSearch.focus();
 }
 function closeMsgEmojiPicker() {
@@ -413,12 +433,21 @@ gifBtn.addEventListener('click', e => {
   e.stopPropagation();
   if (activeGif) { closeGifPicker(); return; }
   closeMsgEmojiPicker();
-  openGifPicker();
+  gifContext = 'channel';
+  openGifPicker(gifBtn);
 });
 
-function openGifPicker() {
+dmGifBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  if (activeGif) { closeGifPicker(); return; }
+  closeMsgEmojiPicker();
+  gifContext = 'dm';
+  openGifPicker(dmGifBtn);
+});
+
+function openGifPicker(anchorBtn = gifBtn) {
   activeGif = true;
-  positionAboveInput(gifPicker, gifBtn);
+  positionAboveInput(gifPicker, anchorBtn);
   gifSearchEl.focus();
   if (gifResultsEl.children.length === 0) fetchTrendingGifs();
 }
@@ -456,7 +485,11 @@ function renderGifs(results) {
     img.src = small.url; img.loading = 'lazy'; img.alt = r.content_description || 'GIF';
     item.appendChild(img);
     item.addEventListener('click', () => {
-      send({ type: 'message', content: full.url, reply_to: null, channel: activeChannel });
+      if (gifContext === 'dm' && activeDm) {
+        send({ type: 'direct_message', to: activeDm, content: full.url });
+      } else {
+        send({ type: 'message', content: full.url, reply_to: null, channel: activeChannel });
+      }
       closeGifPicker();
     });
     gifResultsEl.appendChild(item);
@@ -547,7 +580,7 @@ function logout() {
   document.title = 'ChatFC';
 
   // Reset DM state
-  activeDm = null; dmConvos = new Map(); dmUnread = new Map();
+  activeDm = null; dmConvos = new Map(); dmUnread = new Map(); dmSeenIds = new Set();
   allUsers = { online: [], offline: [] };
   dmPanel.style.display = 'none';
 
@@ -1263,10 +1296,19 @@ function sendDm() {
 }
 
 function handleDmMessage(msg) {
+  // Deduplicate: history replay on reconnect may re-send already-seen DMs.
+  if (msg.id) {
+    if (dmSeenIds.has(msg.id)) return;
+    dmSeenIds.add(msg.id);
+  }
+
   const partner = msg.from === myUsername ? msg.to : msg.from;
-  const entry   = { from: msg.from, to: msg.to, content: msg.content, ts: now() };
+  const ts    = msg.timestamp || now();
+  const entry = { id: msg.id, from: msg.from, to: msg.to, content: msg.content, ts, file: msg.file || null };
+
   if (!dmConvos.has(partner)) dmConvos.set(partner, []);
   dmConvos.get(partner).push(entry);
+
   if (activeDm === partner) {
     appendDmMessageEl(entry, true);
   } else if (msg.from !== myUsername) {
@@ -1279,11 +1321,64 @@ function handleDmMessage(msg) {
 function appendDmMessageEl(msg, scroll) {
   const div = document.createElement('div');
   div.className = 'dm-message' + (msg.from === myUsername ? ' dm-mine' : '');
-  const u = document.createElement('span'); u.className = 'dm-msg-user';
-  u.textContent = `<${msg.from}>`; u.style.color = colorFor(msg.from);
-  const c = document.createElement('span'); c.className = 'dm-msg-content'; c.textContent = msg.content;
-  const t = document.createElement('span'); t.className = 'dm-msg-ts';      t.textContent = msg.ts;
-  div.appendChild(u); div.appendChild(c); div.appendChild(t);
+
+  const u = document.createElement('span');
+  u.className = 'dm-msg-user';
+  u.textContent = `<${msg.from}>`;
+  u.style.color = colorFor(msg.from);
+
+  const body = document.createElement('span');
+  body.className = 'dm-msg-body';
+
+  if (msg.file) {
+    if (msg.file.is_image) {
+      const img = document.createElement('img');
+      img.src = serverUrl(msg.file.url);
+      img.alt = msg.file.filename;
+      img.className = 'dm-msg-image';
+      img.style.cursor = 'pointer';
+      img.addEventListener('click', () => openLightbox(serverUrl(msg.file.url)));
+      body.appendChild(img);
+    } else {
+      const a = document.createElement('a');
+      a.href = serverUrl(msg.file.url);
+      a.textContent = `📎 ${msg.file.filename}`;
+      a.target = '_blank';
+      a.className = 'dm-msg-file-link';
+      body.appendChild(a);
+    }
+    if (msg.content) {
+      const caption = document.createElement('div');
+      caption.className = 'dm-msg-content';
+      caption.textContent = msg.content;
+      body.appendChild(caption);
+    }
+  } else {
+    const isImgUrl = /\.(gif|jpg|jpeg|png|webp)(\?|$)/i.test(msg.content)
+                  || msg.content.includes('media.tenor.com');
+    if (isImgUrl) {
+      const img = document.createElement('img');
+      img.src = msg.content;
+      img.alt = 'image';
+      img.className = 'dm-msg-image';
+      img.style.cursor = 'pointer';
+      img.addEventListener('click', () => openLightbox(msg.content));
+      body.appendChild(img);
+    } else {
+      const c = document.createElement('span');
+      c.className = 'dm-msg-content';
+      c.textContent = msg.content;
+      body.appendChild(c);
+    }
+  }
+
+  const t = document.createElement('span');
+  t.className = 'dm-msg-ts';
+  t.textContent = msg.ts;
+
+  div.appendChild(u);
+  div.appendChild(body);
+  div.appendChild(t);
   dmMessages.appendChild(div);
   if (scroll) dmMessages.scrollTop = dmMessages.scrollHeight;
 }
@@ -1575,6 +1670,38 @@ async function uploadFile(file, caption) {
   } catch (err) {
     placeholder.remove();
     systemMsg(`⚠ Upload échoué : ${err.message}`);
+  }
+}
+
+// ── DM file upload ───────────────────────────────────────────────
+dmFileUpload.addEventListener('change', e => {
+  const files = Array.from(e.target.files);
+  dmFileUpload.value = '';
+  if (!activeDm || files.length === 0) return;
+  files.forEach(f => {
+    if (f.size > MAX_UPLOAD) { systemMsg(`❌ ${f.name} trop lourd (max 20 Mo)`); return; }
+    uploadFileDm(f);
+  });
+});
+
+async function uploadFileDm(file) {
+  if (!activeDm) return;
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    const host      = resolveHost();
+    const httpProto = location.protocol === 'https:' ? 'https:' : 'http:';
+    const res = await fetch(`${httpProto}//${host}/upload`, { method: 'POST', body: fd });
+    if (res.status === 413) throw new Error('Fichier trop lourd (max 20 Mo)');
+    if (!res.ok)            throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    send({
+      type:    'direct_message',
+      to:      activeDm,
+      content: '',
+      file:    { url: data.url, filename: data.filename, is_image: data.is_image },
+    });
+  } catch (err) {
+    systemMsg(`⚠ Upload DM échoué : ${err.message}`);
   }
 }
 
