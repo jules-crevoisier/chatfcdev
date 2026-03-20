@@ -2,9 +2,10 @@
 
 import { TENOR_KEY } from './constants.js';
 import state from './state.js';
-import { gifPicker, gifSearchEl, gifResultsEl, gifBtn, dmGifBtn } from './dom.js';
+import { gifPicker, gifSearchEl, gifResultsEl, gifBtn, dmGifBtn, dmInput } from './dom.js';
 import { send, fetchJson, positionAboveInput } from './helpers.js';
 import { closeMsgEmojiPicker } from './emoji.js';
+import { cancelReply } from './messages.js';
 
 const fetchTrendingGifs = async () => {
   gifResultsEl.innerHTML = '<div class="gif-empty">Loading…</div>';
@@ -39,7 +40,14 @@ const renderGifs = (results) => {
     item.appendChild(img);
     item.addEventListener('click', () => {
       if (state.gifContext === 'dm' && state.activeDm) {
-        send({ type: 'direct_message', to: state.activeDm, content: full.url });
+        send({
+          type: 'direct_message',
+          to: state.activeDm,
+          content: full.url,
+          reply_to: state.replyingTo ? state.replyingTo.id : null,
+        });
+        cancelReply();
+        dmInput.focus();
       } else {
         send({ type: 'message', content: full.url, reply_to: null, channel: state.activeChannel });
       }

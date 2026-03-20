@@ -4,14 +4,14 @@ import state from './state.js';
 import {
   dmPanel, dmClose, dmTitle, dmStatus, dmMessages, dmInput, dmSend,
   usersList, userCount, offlineSection, offlineList, dmFileUpload,
-  notifBadge, mentionCountEl, messageInput,
+  notifBadge, mentionCountEl, messageInput, replyBar, replyBarText,
 } from './dom.js';
-import { send, colorFor, serverUrl, now } from './helpers.js';
+import { send, colorFor, serverUrl, now, escHtml } from './helpers.js';
 import { openLightbox } from './notifications.js';
 import { playBeep } from './helpers.js';
 import { saveView } from './channels.js';
 import { MAX_UPLOAD } from './constants.js';
-import { systemMsg, formatContent } from './messages.js';
+import { systemMsg, formatContent, cancelReply } from './messages.js';
 import { renderReactions, showEmojiPicker } from './emoji.js';
 
 const dmSameUser = (a, b) =>
@@ -22,6 +22,13 @@ const mentionsMe = (content) =>
 
 const insertMention = (username) => {
   dmInput.value += `@${username} `;
+  dmInput.focus();
+};
+
+const startReplyDm = (msgId, username, preview) => {
+  state.replyingTo = { id: msgId, username, preview };
+  replyBar.style.display = 'flex';
+  replyBarText.textContent = `${username}: ${String(preview || '').slice(0, 80)}`;
   dmInput.focus();
 };
 
@@ -67,6 +74,7 @@ export const renderUsers = (online, offline) => {
 
 // ── Open / close DM ──────────────────────────────────────────────
 export const openDm = (user) => {
+  cancelReply(); // Hide reply bar when switching to another MP
   state.activeDm = user;
   state.dmUnread.set(user, 0);
   dmTitle.textContent = `@${user}`;
@@ -87,6 +95,7 @@ export const openDm = (user) => {
 };
 
 export const closeDm = () => {
+  cancelReply(); // Hide reply bar when leaving MP mode
   state.activeDm = null;
   dmPanel.style.display = 'none';
   messageInput.focus();
@@ -96,8 +105,15 @@ export const closeDm = () => {
 const sendDm = () => {
   const content = dmInput.value.trim();
   if (!content || !state.activeDm || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-  send({ type: 'direct_message', to: state.activeDm, content });
+  send({
+    type: 'direct_message',
+    to: state.activeDm,
+    content,
+    reply_to: state.replyingTo ? state.replyingTo.id : null,
+  });
   dmInput.value = '';
+  cancelReply();
+  dmInput.focus();
 };
 
 // ── DM message rendering ─────────────────────────────────────────
@@ -205,6 +221,17 @@ const appendDmMessageEl = (msg, animate, prevMsg) => {
   const actions = document.createElement('div');
   actions.className = 'msg-actions';
 
+  const replyPreview = (msg.content && msg.content.trim())
+    ? msg.content
+    : (msg.file ? msg.file.filename : '');
+
+  actions.appendChild(makeActBtn(
+    '↩',
+    'Répondre',
+    '',
+    () => startReplyDm(msg.id, msg.from, replyPreview)
+  ));
+
   const reactBtn = document.createElement('button');
   reactBtn.className = 'msg-act';
   reactBtn.title = 'Réagir';
@@ -222,6 +249,17 @@ const appendDmMessageEl = (msg, animate, prevMsg) => {
 
   const body = document.createElement('div');
   body.className = 'msg-body';
+  if (msg.reply_to) {
+    const ctx = document.createElement('div');
+    ctx.className = 'reply-context';
+    ctx.innerHTML = `<span class="reply-ctx-user">↩ ${escHtml(msg.reply_to.username)}</span>`
+                  + `<span class="reply-ctx-preview">${escHtml(String(msg.reply_to.preview || '')).slice(0,80)}</span>`;
+    ctx.addEventListener('click', () => {
+      const orig = dmMessages.querySelector(`[data-id="${msg.reply_to.id}"]`);
+      if (orig) orig.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    body.appendChild(ctx);
+  }
   body.appendChild(header);
 
   if (msg.file) {
@@ -297,7 +335,8 @@ export const handleDmHistory = (dms) => {
     const partner = dmSameUser(dm.from, state.myUsername) ? dm.to : dm.from;
     const entry = { id: dm.id, from: dm.from, to: dm.to, content: dm.content,
                     ts: dm.timestamp || now(), file: dm.file || null,
-                    reactions: dm.reactions || {}, edited: !!dm.edited };
+                    reactions: dm.reactions || {}, edited: !!dm.edited,
+                    reply_to: dm.reply_to || null };
     if (!state.dmConvos.has(partner)) state.dmConvos.set(partner, []);
     state.dmConvos.get(partner).push(entry);
   });
@@ -320,6 +359,7 @@ export const handleDmThread = (partner, dms) => {
       id: dm.id, from: dm.from, to: dm.to, content: dm.content,
       ts: dm.timestamp || now(), file: dm.file || null,
       reactions: dm.reactions || {}, edited: !!dm.edited,
+      reply_to: dm.reply_to || null,
     });
   });
   state.dmConvos.set(partner, list);
@@ -342,7 +382,8 @@ export const handleDmMessage = (msg) => {
   const partner = dmSameUser(msg.from, state.myUsername) ? msg.to : msg.from;
   const ts    = msg.timestamp || now();
   const entry = { id: msg.id, from: msg.from, to: msg.to, content: msg.content, ts, file: msg.file || null,
-                    reactions: msg.reactions || {}, edited: !!msg.edited };
+                    reactions: msg.reactions || {}, edited: !!msg.edited,
+                    reply_to: msg.reply_to || null };
 
   if (!state.dmConvos.has(partner)) state.dmConvos.set(partner, []);
   const list = state.dmConvos.get(partner);
@@ -373,8 +414,11 @@ const uploadFileDm = async (file) => {
       type:    'direct_message',
       to:      state.activeDm,
       content: '',
+      reply_to: state.replyingTo ? state.replyingTo.id : null,
       file:    { url: data.url, filename: data.filename, is_image: data.is_image },
     });
+    cancelReply();
+    dmInput.focus();
   } catch (err) {
     systemMsg(`⚠ Upload DM échoué : ${err.message}`);
   }

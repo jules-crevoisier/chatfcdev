@@ -121,6 +121,7 @@ async fn init_db() -> SqlitePool {
             timestamp  TEXT NOT NULL,
             reactions  TEXT NOT NULL DEFAULT '{}',
             edited     INTEGER NOT NULL DEFAULT 0,
+            reply_to   TEXT,
             file       TEXT,
             created_at INTEGER NOT NULL DEFAULT (unixepoch())
         )"
@@ -135,6 +136,8 @@ async fn init_db() -> SqlitePool {
     let _ = sqlx::query(
         "ALTER TABLE direct_messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0"
     ).execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE direct_messages ADD COLUMN reply_to TEXT")
+        .execute(&pool).await;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_dm_participants ON direct_messages(from_user, to_user, created_at)"
@@ -404,19 +407,21 @@ struct DmRecord {
     timestamp: String,
     reactions: HashMap<String, Vec<String>>,
     edited:    bool,
+    reply_to:  Option<ReplyInfo>,
     file:      Option<String>, // JSON-serialized FileAttachment
 }
 
 async fn db_save_dm(pool: &SqlitePool, dm: &DmRecord) -> Result<(), sqlx::Error> {
     let reactions_json = serde_json::to_string(&dm.reactions).unwrap_or_else(|_| "{}".to_string());
     let edited_int = if dm.edited { 1i64 } else { 0i64 };
+    let reply_to_json = dm.reply_to.as_ref().and_then(|r| serde_json::to_string(r).ok());
     sqlx::query(
-        "INSERT INTO direct_messages (id, from_user, to_user, content, timestamp, reactions, edited, file)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        "INSERT INTO direct_messages (id, from_user, to_user, content, timestamp, reactions, edited, reply_to, file)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
     )
     .bind(&dm.id).bind(&dm.from_user).bind(&dm.to_user)
     .bind(&dm.content).bind(&dm.timestamp)
-    .bind(reactions_json).bind(edited_int)
+    .bind(reactions_json).bind(edited_int).bind(reply_to_json)
     .bind(&dm.file)
     .execute(pool).await?;
     Ok(())
@@ -426,7 +431,7 @@ async fn db_save_dm(pool: &SqlitePool, dm: &DmRecord) -> Result<(), sqlx::Error>
 /// returned in chronological order.
 async fn db_load_dms(pool: &SqlitePool, username: &str, limit: i64) -> Vec<DmRecord> {
     let result = sqlx::query(
-        "SELECT id, from_user, to_user, content, timestamp, reactions, edited, file
+        "SELECT id, from_user, to_user, content, timestamp, reactions, edited, reply_to, file
          FROM (
              SELECT *, rowid AS _rowid FROM direct_messages
              WHERE from_user=?1 OR to_user=?1
@@ -451,6 +456,8 @@ async fn db_load_dms(pool: &SqlitePool, username: &str, limit: i64) -> Vec<DmRec
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
         edited: row.try_get::<i64, _>("edited").ok().map(|v| v != 0).unwrap_or(false),
+        reply_to: row.try_get::<Option<String>, _>("reply_to").ok().flatten()
+            .and_then(|s| serde_json::from_str(&s).ok()),
         file:      row.try_get("file").ok().flatten(),
     })).collect()
 }
@@ -458,7 +465,7 @@ async fn db_load_dms(pool: &SqlitePool, username: &str, limit: i64) -> Vec<DmRec
 /// All DMs between two users, newest-first window then chronological, up to `limit` rows.
 async fn db_load_dm_thread(pool: &SqlitePool, user_a: &str, user_b: &str, limit: i64) -> Vec<DmRecord> {
     let rows = sqlx::query(
-        "SELECT id, from_user, to_user, content, timestamp, reactions, edited, file
+        "SELECT id, from_user, to_user, content, timestamp, reactions, edited, reply_to, file
          FROM (
              SELECT *, rowid AS _rowid FROM direct_messages
              WHERE (from_user=?1 AND to_user=?2) OR (from_user=?2 AND to_user=?1)
@@ -479,6 +486,8 @@ async fn db_load_dm_thread(pool: &SqlitePool, user_a: &str, user_b: &str, limit:
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
         edited: row.try_get::<i64, _>("edited").ok().map(|v| v != 0).unwrap_or(false),
+        reply_to: row.try_get::<Option<String>, _>("reply_to").ok().flatten()
+            .and_then(|s| serde_json::from_str(&s).ok()),
         file:      row.try_get("file").ok().flatten(),
     })).collect()
 }
@@ -577,7 +586,7 @@ enum ClientMsg {
     },
     EditMessage   { message_id: String, content: String },
     DeleteMessage { message_id: String },
-    DirectMessage { to: String, content: String, #[serde(default)] file: Option<FileAttachment> },
+    DirectMessage { to: String, content: String, #[serde(default)] file: Option<FileAttachment>, reply_to: Option<String> },
     SetTopic {
         content: String,
         #[serde(default = "default_channel")]
@@ -608,7 +617,7 @@ enum ServerMsg {
     Reaction     { message_id: String, reactions: HashMap<String, Vec<String>> },
     MessageEdited  { message_id: String, content: String },
     MessageDeleted { message_id: String },
-    DirectMessage  { id: String, from: String, to: String, content: String, timestamp: String, reactions: HashMap<String, Vec<String>>, edited: bool, #[serde(skip_serializing_if = "Option::is_none")] file: Option<FileAttachment> },
+    DirectMessage  { id: String, from: String, to: String, content: String, timestamp: String, reactions: HashMap<String, Vec<String>>, edited: bool, #[serde(skip_serializing_if = "Option::is_none")] reply_to: Option<ReplyInfo>, #[serde(skip_serializing_if = "Option::is_none")] file: Option<FileAttachment> },
     TopicChanged   { content: String, channel: String },
     Typing         { username: String, channel: String },
     ChannelList    { channels: Vec<ChannelInfo> },
@@ -631,6 +640,8 @@ struct DmHistoryEntry {
     reactions: HashMap<String, Vec<String>>,
     edited:    bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    reply_to: Option<ReplyInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     file:      Option<FileAttachment>,
 }
 
@@ -645,6 +656,7 @@ fn dm_record_to_history_entry(dm: DmRecord) -> DmHistoryEntry {
         timestamp: dm.timestamp,
         reactions: dm.reactions,
         edited:    dm.edited,
+        reply_to:  dm.reply_to,
         file,
     }
 }
@@ -1254,7 +1266,7 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
         }
 
         // ── Direct message ─────────────────────────────────────────
-        ClientMsg::DirectMessage { to, content, file } => {
+        ClientMsg::DirectMessage { to, content, file, reply_to } => {
             // Require at least some content or a file attachment.
             if content.is_empty() && file.is_none() { return; }
             if content.len() > 2000 { return; }
@@ -1275,6 +1287,45 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
             let ts     = chrono::Local::now().format("%H:%M").to_string();
             let file_json = file.as_ref()
                 .and_then(|f| serde_json::to_string(f).ok());
+
+            let reply_to_info = if let Some(ref rid) = reply_to {
+                // Resolve the replied message inside this DM thread (both directions).
+                // If not found, we just omit reply context.
+                let rid = rid.to_string();
+                let row = sqlx::query(
+                    "SELECT from_user, content, file
+                     FROM direct_messages
+                     WHERE id=?1
+                       AND ((from_user=?2 AND to_user=?3) OR (from_user=?3 AND to_user=?2))"
+                )
+                    .bind(&rid).bind(&username).bind(&to_canonical)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten();
+
+                if let Some(r) = row {
+                    let from_user = r.try_get::<String, _>("from_user").unwrap_or_default();
+                    let raw_content = r.try_get::<String, _>("content").unwrap_or_default();
+                    let file_att = r.try_get::<Option<String>, _>("file").ok().flatten()
+                        .and_then(|s| serde_json::from_str::<FileAttachment>(&s).ok());
+
+                    let preview = if !raw_content.is_empty() {
+                        raw_content.chars().take(120).collect::<String>()
+                    } else if let Some(f) = file_att {
+                        f.filename
+                    } else {
+                        String::new()
+                    };
+
+                    Some(ReplyInfo { id: rid, username: from_user, preview })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             let record = DmRecord {
                 id:        dm_id.clone(),
                 from_user: username.to_string(),
@@ -1283,6 +1334,7 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
                 timestamp: ts.clone(),
                 reactions: HashMap::new(),
                 edited:    false,
+                reply_to:  reply_to_info.clone(),
                 file:      file_json,
             };
 
@@ -1304,6 +1356,7 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
                 timestamp: ts,
                 reactions: HashMap::new(),
                 edited:    false,
+                reply_to:  reply_to_info,
                 file,
             }) { Ok(j) => j, Err(_) => return };
 

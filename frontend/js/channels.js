@@ -4,7 +4,7 @@ import { VIEW_KEY } from './constants.js';
 import state from './state.js';
 import { channelTabsEl, messageInput, typingIndicator, headerInfo } from './dom.js';
 import { send, escHtml, scrollToBottom } from './helpers.js';
-import { renderChannel } from './messages.js';
+import { renderChannel, cancelReply } from './messages.js';
 
 // ── View persistence ─────────────────────────────────────────────
 export const saveView = () => {
@@ -100,6 +100,7 @@ export const renderChannelTabs = () => {
 
 export const switchChannel = (name) => {
   if (name === state.activeChannel) return;
+  cancelReply(); // Hide reply bar when switching channel
   state.activeChannel = name;
   state.channelUnread.set(name, 0);
   renderChannelTabs();

@@ -83,6 +83,8 @@
   background: rgba(126,207,207,.04);
   font-size: 12px;
   gap: 6px;
+  position: relative;
+  z-index: 80; /* Must be above #dm-panel (z-index: 50) */
 }
 
 .reply-bar-label { color: var(--cyan); flex-shrink: 0; }
