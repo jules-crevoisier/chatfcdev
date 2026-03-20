@@ -7,6 +7,7 @@ use std::{
 
 use axum::{
     extract::{
+        connect_info::ConnectInfo,
         ws::{Message, WebSocket, WebSocketUpgrade},
         Multipart, Query, State,
     },
@@ -15,8 +16,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use axum::http::{header, HeaderValue};
+use std::net::SocketAddr;
 use dashmap::DashMap;
 use futures::{sink::SinkExt, stream::StreamExt};
+use argon2::{
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{
@@ -25,7 +32,9 @@ use sqlx::{
     SqlitePool,
 };
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tower_http::{cors::CorsLayer, services::ServeDir};
+use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::services::ServeDir;
 use uuid::Uuid;
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -43,6 +52,38 @@ const SPAM_WINDOW_SECS: u64   = 5;
 const SPAM_MAX_MSGS:    usize  = 5;
 /// Escalating mute durations in seconds (index = violation count - 1, clamped).
 const SPAM_MUTES: &[u64] = &[15, 60, 300, 600];
+
+/// Session token validity window (used for auth + WS).
+const TOKEN_TTL_SECS: i64 = 30 * 24 * 60 * 60; // 30 days
+
+/// Hard limit on WebSocket JSON payload size (anti-DoS).
+const MAX_WS_MSG_SIZE: usize = 50 * 1024; // 50 KiB
+
+/// Security headers (CSP) tuned for this app:
+/// - Allow `blob:` images for previews (URL.createObjectURL)
+/// - Allow `https:` for Tenor/Giphy GIF APIs and images
+/// - Allow `ws:`/`wss:` for WebSocket chat
+const CSP: &str = concat!(
+    "default-src 'self';",
+    " script-src 'self';",
+    " style-src 'self' 'unsafe-inline';",
+    " img-src 'self' data: blob: https:;",
+    " connect-src 'self' https: ws: wss:;",
+    " object-src 'none';",
+    " base-uri 'self';",
+    " frame-ancestors 'none';",
+    " form-action 'self';"
+);
+
+/// Rate limiting (per IP, in-memory; self-hosted simple mode).
+const AUTH_RATE_LIMIT: u64 = 10;      // requests
+const AUTH_RATE_WINDOW_SECS: u64 = 60;
+const WS_RATE_LIMIT: u64 = 5;         // upgrade attempts
+const WS_RATE_WINDOW_SECS: u64 = 60;
+
+/// Upload quota & orphan cleanup.
+const MAX_UPLOADS_TOTAL_BYTES: u64 = 500 * 1024 * 1024; // 500 MiB
+const ORPHAN_MAX_AGE_SECS: u64 = 30 * 24 * 60 * 60; // 30 days
 
 // ── SQLite – init & schema ─────────────────────────────────────────────────────
 
@@ -71,9 +112,21 @@ async fn init_db() -> SqlitePool {
             salt          TEXT NOT NULL,
             password_hash TEXT NOT NULL,
             token         TEXT NOT NULL,
+            token_expires INTEGER,
             created_at    INTEGER NOT NULL DEFAULT (unixepoch())
         )"
     ).execute(&pool).await.expect("create users table");
+
+    // Backward compatibility: previous schema versions didn't have token_expires.
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN token_expires INTEGER").execute(&pool).await;
+    // Keep existing tokens working for a while on upgrade.
+    let _ = sqlx::query(
+        "UPDATE users
+         SET token_expires = (unixepoch() + ?1)
+         WHERE token_expires IS NULL"
+    )
+    .bind(TOKEN_TTL_SECS)
+    .execute(&pool).await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS emojis (
@@ -157,10 +210,12 @@ struct UserRecord {
     salt: String,
     password_hash: String,
     token: String,
+    #[serde(default)]
+    token_expires: Option<i64>,
 }
 type UserStore = HashMap<String, UserRecord>;
 
-fn hash_password(salt: &str, password: &str) -> String {
+fn hash_password_legacy(salt: &str, password: &str) -> String {
     let mut h = Sha256::new();
     h.update(salt.as_bytes());
     h.update(b":");
@@ -168,10 +223,40 @@ fn hash_password(salt: &str, password: &str) -> String {
     hex::encode(h.finalize())
 }
 
+fn hash_password_argon2(password: &str, salt_uuid: Uuid) -> String {
+    // UUID bytes are exactly 16 bytes, which is a good salt size for Argon2.
+    let salt = SaltString::encode_b64(salt_uuid.as_bytes())
+        .expect("argon2 salt encoding should be valid");
+
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("argon2 hashing should not fail")
+        .to_string()
+}
+
+fn verify_password(stored_hash: &str, salt: &str, password: &str) -> bool {
+    if stored_hash.starts_with("$argon2") {
+        let parsed = PasswordHash::new(stored_hash);
+        if parsed.is_err() {
+            return false;
+        }
+        let parsed = parsed.unwrap();
+        Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok()
+    } else {
+        hash_password_legacy(salt, password) == stored_hash
+    }
+}
+
+fn needs_password_upgrade(stored_hash: &str) -> bool {
+    !stored_hash.starts_with("$argon2")
+}
+
 // ── SQLite – users ─────────────────────────────────────────────────────────────
 
 async fn db_load_users(pool: &SqlitePool) -> UserStore {
-    sqlx::query("SELECT username, salt, password_hash, token FROM users")
+    sqlx::query("SELECT username, salt, password_hash, token, token_expires FROM users")
         .fetch_all(pool)
         .await
         .unwrap_or_default()
@@ -182,6 +267,7 @@ async fn db_load_users(pool: &SqlitePool) -> UserStore {
                 salt:          row.try_get("salt").ok()?,
                 password_hash: row.try_get("password_hash").ok()?,
                 token:         row.try_get("token").ok()?,
+                token_expires: row.try_get("token_expires").ok()?,
             }))
         })
         .collect()
@@ -189,18 +275,28 @@ async fn db_load_users(pool: &SqlitePool) -> UserStore {
 
 async fn db_upsert_user(pool: &SqlitePool, username: &str, rec: &UserRecord) {
     let _ = sqlx::query(
-        "INSERT INTO users (username, salt, password_hash, token)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO users (username, salt, password_hash, token, token_expires)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(username) DO UPDATE SET
-             salt=excluded.salt, password_hash=excluded.password_hash, token=excluded.token"
+             salt=excluded.salt,
+             password_hash=excluded.password_hash,
+             token=excluded.token,
+             token_expires=excluded.token_expires"
     )
-    .bind(username).bind(&rec.salt).bind(&rec.password_hash).bind(&rec.token)
+    .bind(username)
+    .bind(&rec.salt)
+    .bind(&rec.password_hash)
+    .bind(&rec.token)
+    .bind(rec.token_expires)
     .execute(pool).await;
 }
 
-async fn db_update_token(pool: &SqlitePool, username: &str, token: &str) {
-    let _ = sqlx::query("UPDATE users SET token=?1 WHERE username=?2")
-        .bind(token).bind(username).execute(pool).await;
+async fn db_update_token(pool: &SqlitePool, username: &str, token: &str, token_expires: i64) {
+    let _ = sqlx::query("UPDATE users SET token=?1, token_expires=?2 WHERE username=?3")
+        .bind(token)
+        .bind(token_expires)
+        .bind(username)
+        .execute(pool).await;
 }
 
 /// On first startup, migrate old users.json → DB.
@@ -215,6 +311,17 @@ async fn migrate_users_json(pool: &SqlitePool) {
         db_upsert_user(pool, username, rec).await;
     }
     tracing::info!("Migrated {} users from users.json → SQLite", store.len());
+}
+
+async fn db_fill_token_expiries(pool: &SqlitePool) {
+    let _ = sqlx::query(
+        "UPDATE users
+         SET token_expires = (unixepoch() + ?1)
+         WHERE token_expires IS NULL"
+    )
+    .bind(TOKEN_TTL_SECS)
+    .execute(pool)
+    .await;
 }
 
 // ── SQLite – emojis ────────────────────────────────────────────────────────────
@@ -688,6 +795,9 @@ struct AppState {
     emojis: Mutex<Vec<CustomEmoji>>,
     /// Per-user spam tracking.
     spam_tracker: DashMap<String, Arc<Mutex<SpamState>>>,
+    /// Rate limiting per client IP.
+    rate_auth: DashMap<String, Arc<Mutex<VecDeque<Instant>>>>,
+    rate_ws: DashMap<String, Arc<Mutex<VecDeque<Instant>>>>,
     db: SqlitePool,
 }
 
@@ -698,6 +808,7 @@ impl AppState {
 
         // One-time JSON → DB migrations (no-op if DB already populated).
         migrate_users_json(&db).await;
+        db_fill_token_expiries(&db).await;
         migrate_emojis_json(&db).await;
 
         let auth   = db_load_users(&db).await;
@@ -737,6 +848,8 @@ impl AppState {
             channel_owners,
             emojis: Mutex::new(emojis),
             spam_tracker: DashMap::new(),
+            rate_auth: DashMap::new(),
+            rate_ws: DashMap::new(),
             db,
         })
     }
@@ -764,6 +877,43 @@ fn resolve_auth_username(auth: &UserStore, sanitized: &str) -> Option<String> {
         return Some(sanitized.to_string());
     }
     auth.keys().find(|k| k.eq_ignore_ascii_case(sanitized)).cloned()
+}
+
+fn resolve_user_by_token(auth: &UserStore, token: &str, now_ts: i64) -> Option<String> {
+    if token.is_empty() {
+        return None;
+    }
+    auth.iter()
+        .find(|(_, r)| r.token == token && r.token_expires.map_or(false, |exp| exp > now_ts))
+        .map(|(u, _)| u.clone())
+}
+
+async fn check_rate_limited(
+    bucket: &DashMap<String, Arc<Mutex<VecDeque<Instant>>>>,
+    key: &str,
+    limit: u64,
+    window: Duration,
+) -> Option<u64> {
+    let arc = bucket
+        .entry(key.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(VecDeque::new())))
+        .clone();
+
+    let mut history = arc.lock().await;
+    let now = Instant::now();
+
+    // Evict timestamps outside window.
+    history.retain(|&t| now.duration_since(t) < window);
+
+    if (history.len() as u64) >= limit {
+        // remaining time = window - elapsed_since_oldest
+        let oldest = history.front().copied().unwrap_or(now);
+        let elapsed = now.duration_since(oldest);
+        return Some((window.saturating_sub(elapsed)).as_secs() + 1);
+    }
+
+    history.push_back(now);
+    None
 }
 
 fn send_to_user(state: &Arc<AppState>, username: &str, msg: &str) {
@@ -807,6 +957,13 @@ async fn main() {
     tokio::fs::create_dir_all("data").await.unwrap();
 
     let state = AppState::new().await;
+    // Quick orphan cleanup in background (doesn't affect current chat data).
+    let db_for_cleanup = state.db.clone();
+    tokio::spawn(async move {
+        if let Err(e) = cleanup_orphan_uploads(db_for_cleanup).await {
+            tracing::warn!("uploads cleanup skipped: {}", e);
+        }
+    });
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
@@ -817,7 +974,23 @@ async fn main() {
         .route("/auth/verify", get(verify_handler))
         .nest_service("/uploads", ServeDir::new("uploads"))
         .nest_service("/", ServeDir::new("frontend"))
-        .layer(CorsLayer::permissive())
+        .layer(RequestBodyLimitLayer::new(25 * 1024 * 1024))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CSP),
+        ))
         .with_state(state);
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
@@ -828,7 +1001,7 @@ async fn main() {
     println!("╚══════════════════════════╝");
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 }
 
 // ── Auth handlers ──────────────────────────────────────────────────────────────
@@ -837,9 +1010,26 @@ async fn main() {
 struct AuthRequest { username: String, password: String }
 
 async fn register_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<AuthRequest>,
 ) -> impl IntoResponse {
+    let ip_key = format!("auth:{}", addr.ip());
+    if let Some(remaining_secs) = check_rate_limited(
+        &state.rate_auth,
+        &ip_key,
+        AUTH_RATE_LIMIT,
+        Duration::from_secs(AUTH_RATE_WINDOW_SECS),
+    ).await
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": format!("Trop de requêtes. Réessaie dans {}s.", remaining_secs)
+            })),
+        ).into_response();
+    }
+
     let username: String = req.username.chars()
         .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
         .take(24).collect();
@@ -859,10 +1049,18 @@ async fn register_handler(
             Json(serde_json::json!({"error": "username already taken"}))).into_response();
     }
 
-    let salt          = Uuid::new_v4().to_string();
-    let password_hash = hash_password(&salt, &req.password);
-    let token         = Uuid::new_v4().to_string();
-    let rec = UserRecord { salt, password_hash, token: token.clone() };
+    let now_ts = chrono::Utc::now().timestamp();
+    let salt_uuid    = Uuid::new_v4();
+    let salt         = salt_uuid.to_string();
+    let password_hash = hash_password_argon2(&req.password, salt_uuid);
+    let token        = Uuid::new_v4().to_string();
+    let token_expires = now_ts + TOKEN_TTL_SECS;
+    let rec = UserRecord {
+        salt,
+        password_hash,
+        token: token.clone(),
+        token_expires: Some(token_expires),
+    };
 
     db_upsert_user(&state.db, &username, &rec).await;
     auth.insert(username.clone(), rec);
@@ -871,36 +1069,87 @@ async fn register_handler(
 }
 
 async fn login_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<AuthRequest>,
 ) -> impl IntoResponse {
+    let ip_key = format!("auth:{}", addr.ip());
+    if let Some(remaining_secs) = check_rate_limited(
+        &state.rate_auth,
+        &ip_key,
+        AUTH_RATE_LIMIT,
+        Duration::from_secs(AUTH_RATE_WINDOW_SECS),
+    ).await
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": format!("Trop de requêtes. Réessaie dans {}s.", remaining_secs)
+            })),
+        ).into_response();
+    }
+
     let mut auth = state.auth.lock().await;
 
-    let record = match auth.get(&req.username) {
+    let username = req.username;
+    let password = req.password;
+
+    let record = match auth.get(&username) {
         Some(r) => r.clone(),
         None => return (StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid credentials"}))).into_response(),
     };
 
-    if hash_password(&record.salt, &req.password) != record.password_hash {
+    if !verify_password(&record.password_hash, &record.salt, &password) {
         return (StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid credentials"}))).into_response();
     }
 
+    let now_ts = chrono::Utc::now().timestamp();
     let token = Uuid::new_v4().to_string();
-    auth.get_mut(&req.username).unwrap().token = token.clone();
-    db_update_token(&state.db, &req.username, &token).await;
+    let token_expires = now_ts + TOKEN_TTL_SECS;
 
-    Json(serde_json::json!({"username": req.username, "token": token})).into_response()
+    let mut updated = record.clone();
+    updated.token = token.clone();
+    updated.token_expires = Some(token_expires);
+    if needs_password_upgrade(&updated.password_hash) {
+        let salt_uuid = Uuid::new_v4();
+        updated.salt = salt_uuid.to_string();
+        updated.password_hash = hash_password_argon2(&password, salt_uuid);
+    }
+
+    auth.insert(username.clone(), updated.clone());
+    drop(auth);
+    db_upsert_user(&state.db, &username, &updated).await;
+
+    Json(serde_json::json!({"username": username, "token": token})).into_response()
 }
 
 async fn verify_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let ip_key = format!("auth:{}", addr.ip());
+    if let Some(remaining_secs) = check_rate_limited(
+        &state.rate_auth,
+        &ip_key,
+        AUTH_RATE_LIMIT,
+        Duration::from_secs(AUTH_RATE_WINDOW_SECS),
+    ).await
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": format!("Trop de requêtes. Réessaie dans {}s.", remaining_secs)
+            })),
+        ).into_response();
+    }
+
     let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let now_ts = chrono::Utc::now().timestamp();
     let auth = state.auth.lock().await;
-    match auth.iter().find(|(_, r)| r.token == token).map(|(u, _)| u.clone()) {
+    match resolve_user_by_token(&auth, token, now_ts) {
         Some(u) => Json(serde_json::json!({"username": u})).into_response(),
         None    => StatusCode::UNAUTHORIZED.into_response(),
     }
@@ -910,13 +1159,30 @@ async fn verify_handler(
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> axum::response::Response {
+    let ip_key = format!("ws:{}", addr.ip());
+    if let Some(remaining_secs) = check_rate_limited(
+        &state.rate_ws,
+        &ip_key,
+        WS_RATE_LIMIT,
+        Duration::from_secs(WS_RATE_WINDOW_SECS),
+    ).await
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("Trop de connexions. Réessaie dans {}s.", remaining_secs),
+        )
+            .into_response();
+    }
+
     let token = params.get("token").cloned().unwrap_or_default();
+    let now_ts = chrono::Utc::now().timestamp();
     let username = {
         let auth = state.auth.lock().await;
-        auth.iter().find(|(_, r)| r.token == token).map(|(u, _)| u.clone())
+        resolve_user_by_token(&auth, &token, now_ts)
     };
     match username {
         Some(u) => ws.on_upgrade(move |socket| handle_socket(socket, state, u)).into_response(),
@@ -1074,6 +1340,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, username: String
 }
 
 async fn handle_client_message(text: &str, username: &str, session_id: &str, state: &Arc<AppState>) {
+    if text.len() > MAX_WS_MSG_SIZE {
+        tracing::warn!(len = text.len(), "ignored oversized ws message");
+        return;
+    }
     let Ok(client_msg) = serde_json::from_str::<ClientMsg>(text) else {
         tracing::debug!(len = text.len(), "ignored non-json or unknown client message");
         return;
@@ -1506,6 +1776,140 @@ async fn broadcast_users(state: &Arc<AppState>) {
     }
 }
 
+async fn uploads_dir_size_bytes() -> u64 {
+    let mut total: u64 = 0;
+
+    // uploads/ and uploads/emojis/ are the only locations we write to.
+    for dir in ["uploads", "uploads/emojis"] {
+        let Ok(mut rd) = tokio::fs::read_dir(dir).await else { continue };
+        while let Ok(Some(ent)) = rd.next_entry().await {
+            let Ok(meta) = ent.metadata().await else { continue };
+            if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+
+    total
+}
+
+fn extract_upload_url_from_file_json(file_json: &str) -> Option<String> {
+    let trimmed = file_json.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(u) = v.get("url").and_then(|x| x.as_str()) {
+            return Some(u.to_string());
+        }
+    }
+
+    // Fallback: best-effort substring extraction.
+    if let Some(start) = trimmed.find("/uploads/") {
+        let after = &trimmed[start..];
+        let end = after.find('"').unwrap_or(after.len());
+        let candidate = &after[..end];
+        if !candidate.is_empty() {
+            return Some(candidate.to_string());
+        }
+    }
+
+    None
+}
+
+async fn referenced_upload_urls(db: &SqlitePool) -> HashSet<String> {
+    let mut urls = HashSet::<String>::new();
+
+    if let Ok(rows) = sqlx::query("SELECT file FROM messages WHERE file IS NOT NULL")
+        .fetch_all(db)
+        .await
+    {
+        for row in rows {
+            let file_json: Option<String> = row.try_get("file").ok();
+            if let Some(s) = file_json {
+                if let Some(u) = extract_upload_url_from_file_json(&s) {
+                    urls.insert(u);
+                }
+            }
+        }
+    }
+
+    if let Ok(rows) = sqlx::query("SELECT file FROM direct_messages WHERE file IS NOT NULL")
+        .fetch_all(db)
+        .await
+    {
+        for row in rows {
+            let file_json: Option<String> = row.try_get("file").ok();
+            if let Some(s) = file_json {
+                if let Some(u) = extract_upload_url_from_file_json(&s) {
+                    urls.insert(u);
+                }
+            }
+        }
+    }
+
+    if let Ok(rows) = sqlx::query("SELECT url FROM emojis")
+        .fetch_all(db)
+        .await
+    {
+        for row in rows {
+            let url: String = row.try_get("url").unwrap_or_default();
+            if !url.is_empty() {
+                urls.insert(url);
+            }
+        }
+    }
+
+    urls
+}
+
+async fn cleanup_orphan_uploads(db: SqlitePool) -> Result<(), String> {
+    let referenced = referenced_upload_urls(&db).await;
+    let now = std::time::SystemTime::now();
+    let max_age = std::time::Duration::from_secs(ORPHAN_MAX_AGE_SECS);
+
+    let mut deleted: usize = 0;
+
+    for base in ["uploads", "uploads/emojis"] {
+        let Ok(mut rd) = tokio::fs::read_dir(base).await else { continue };
+        while let Ok(Some(ent)) = rd.next_entry().await {
+            let path = ent.path();
+            let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else { continue };
+
+            if let Ok(meta) = ent.metadata().await {
+                if !meta.is_file() {
+                    continue;
+                }
+
+                let url = if base == "uploads/emojis" {
+                    format!("/uploads/emojis/{}", file_name)
+                } else {
+                    format!("/uploads/{}", file_name)
+                };
+
+                // Never delete referenced uploads.
+                if referenced.contains(&url) {
+                    continue;
+                }
+
+                let Ok(modified) = meta.modified() else { continue };
+                let age = now.duration_since(modified).unwrap_or_default();
+                if age < max_age {
+                    continue;
+                }
+
+                if tokio::fs::remove_file(&path).await.is_ok() {
+                    deleted += 1;
+                }
+            }
+        }
+    }
+
+    tracing::info!("uploads cleanup: deleted {} orphan files", deleted);
+    Ok(()) // don’t fail chat app if cleanup fails
+}
+
 // ── Custom emoji upload ────────────────────────────────────────────────────────
 
 async fn emoji_upload_handler(
@@ -1514,9 +1918,10 @@ async fn emoji_upload_handler(
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     let token    = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let now_ts   = chrono::Utc::now().timestamp();
     let username = {
         let auth = state.auth.lock().await;
-        auth.iter().find(|(_, r)| r.token == token).map(|(u, _)| u.clone())
+        resolve_user_by_token(&auth, token, now_ts)
     };
     let username = match username {
         Some(u) => u,
@@ -1555,6 +1960,17 @@ async fn emoji_upload_handler(
         return (StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error": "fichier trop lourd (max 1 Mo)"}))).into_response();
     }
 
+    // Quota disque total uploads/.
+    let needed = file_bytes.len() as u64;
+    let current_total = uploads_dir_size_bytes().await;
+    if current_total.saturating_add(needed) > MAX_UPLOADS_TOTAL_BYTES {
+        let _ = cleanup_orphan_uploads(state.db.clone()).await;
+        let current_total2 = uploads_dir_size_bytes().await;
+        if current_total2.saturating_add(needed) > MAX_UPLOADS_TOTAL_BYTES {
+            return (StatusCode::INSUFFICIENT_STORAGE, Json(serde_json::json!({"error": "Espace de stockage insuffisant sur uploads."}))).into_response();
+        }
+    }
+
     {
         let emojis = state.emojis.lock().await;
         if emojis.len() >= MAX_CUSTOM_EMOJIS {
@@ -1590,8 +2006,21 @@ async fn emoji_upload_handler(
 // ── File upload ────────────────────────────────────────────────────────────────
 
 async fn upload_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    let now_ts = chrono::Utc::now().timestamp();
+    let username = {
+        let auth = state.auth.lock().await;
+        resolve_user_by_token(&auth, token, now_ts)
+    };
+    let _username = match username {
+        Some(u) => u,
+        None => return Err((StatusCode::UNAUTHORIZED, "Non autorisé : token invalide ou expiré.".to_string())),
+    };
+
     while let Some(field) = multipart.next_field().await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     {
@@ -1600,21 +2029,39 @@ async fn upload_handler(
             .filter(|c| c.is_alphanumeric() || *c == '.' || *c == '_' || *c == '-').collect();
         let safe_name = if safe_name.is_empty() { "file".to_string() } else { safe_name };
         let ext = PathBuf::from(&safe_name).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        if ext == "svg" {
+            return Err((StatusCode::BAD_REQUEST, "Type non supporté : SVG est bloqué pour sécurité.".to_string()));
+        }
         let data = field.bytes().await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
         if data.len() > MAX_FILE_SIZE {
-            return Err((StatusCode::PAYLOAD_TOO_LARGE, "File too large (max 20 MB)".to_string()));
+            return Err((StatusCode::PAYLOAD_TOO_LARGE, "Fichier trop lourd : taille max 20 Mo.".to_string()));
         }
+
+        // Quota disque total: si dépassé, on tente un nettoyage orphelin avant de refuser.
+        let needed = data.len() as u64;
+        let current_total = uploads_dir_size_bytes().await;
+        if current_total.saturating_add(needed) > MAX_UPLOADS_TOTAL_BYTES {
+            let _ = cleanup_orphan_uploads(state.db.clone()).await;
+            let current_total2 = uploads_dir_size_bytes().await;
+            if current_total2.saturating_add(needed) > MAX_UPLOADS_TOTAL_BYTES {
+                return Err((
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    "Espace de stockage insuffisant sur uploads. Réessaie plus tard.".to_string(),
+                ));
+            }
+        }
+
         let unique_name = format!("{}_{}", &Uuid::new_v4().to_string()[..8], safe_name);
         let path = format!("uploads/{}", unique_name);
         tokio::fs::write(&path, &data).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let is_image = matches!(ext.as_str(), "jpg"|"jpeg"|"png"|"gif"|"webp"|"svg"|"avif");
+        let is_image = matches!(ext.as_str(), "jpg"|"jpeg"|"png"|"gif"|"webp");
         return Ok(Json(serde_json::json!({
             "url":      format!("/uploads/{}", unique_name),
             "filename": safe_name,
             "is_image": is_image
         })));
     }
-    Err((StatusCode::BAD_REQUEST, "No file in request".to_string()))
+    Err((StatusCode::BAD_REQUEST, "Aucun fichier reçu dans la requête.".to_string()))
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 'use strict';
 
-import { MAX_UPLOAD } from './constants.js';
+import { MAX_UPLOAD, TOKEN_KEY } from './constants.js';
 import state from './state.js';
 import {
   messagesList, messageInput, fileUpload, fileStaging,
@@ -178,12 +178,45 @@ const appendUploadPlaceholder = (name) => {
 const uploadFile = async (file, caption) => {
   const placeholder = appendUploadPlaceholder(file.name);
   const fd = new FormData(); fd.append('file', file);
+
+  const readErrorMessage = async (res) => {
+    // Axum renvoie souvent un String (pas du JSON). On lit une seule fois en text,
+    // puis on tente de parser en JSON si possible.
+    let txt = '';
+    try { txt = await res.text(); } catch (_) {}
+    txt = (txt || '').trim();
+    if (!txt) return `HTTP ${res.status}`;
+
+    try {
+      const data = JSON.parse(txt);
+      if (data?.error) return String(data.error);
+      if (data?.message) return String(data.message);
+      return JSON.stringify(data);
+    } catch (_) {
+      return txt;
+    }
+  };
+
   try {
     const host      = resolveHost();
     const httpProto = location.protocol === 'https:' ? 'https:' : 'http:';
-    const res = await fetch(`${httpProto}//${host}/upload`, { method: 'POST', body: fd });
-    if (res.status === 413) throw new Error('Fichier trop lourd (max 20 Mo)');
-    if (!res.ok)            throw new Error(`HTTP ${res.status}`);
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) { throw new Error('Unauthorized: missing token'); }
+    const res = await fetch(
+      `${httpProto}//${host}/upload?token=${encodeURIComponent(token)}`,
+      { method: 'POST', body: fd }
+    );
+
+    if (!res.ok) {
+      const serverMsg = await readErrorMessage(res);
+      // Petite normalisation : si serveur dit déjà "fichier trop lourd", on respecte son texte.
+      if (res.status === 413 && serverMsg.toLowerCase().includes('lourd')) {
+        throw new Error(serverMsg);
+      }
+      // Souvent pour les erreurs type SVG : backend renvoie le message.
+      throw new Error(serverMsg || `HTTP ${res.status}`);
+    }
+
     const data = await res.json();
     placeholder.remove();
     send({ type: 'file_message', filename: data.filename, url: data.url,

@@ -7,6 +7,7 @@ import { handleServer } from './router.js';
 import { appendBanner } from './messages.js';
 import { restoreView } from './channels.js';
 import { openDm } from './dm.js';
+import { TOKEN_KEY } from './constants.js';
 
 export const connectWS = (token) => {
   clearTimeout(state.reconnectTimer);
@@ -45,8 +46,29 @@ const scheduleReconnect = () => {
   appendBanner(`⚠ Disconnected. Reconnecting in ${Math.round(state.reconnectDelay / 1000)}s…`);
   state.reconnectTimer = setTimeout(() => {
     appendBanner('↺ Reconnecting…');
-    const token = localStorage.getItem('chatfc_token');
-    if (token) connectWS(token);
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) { state.reconnectDelay = Math.min(state.reconnectDelay * 2, 30000); return; }
+
+    (async () => {
+      // If token is expired, stop infinite reconnect loops.
+      const host      = resolveHost();
+      const httpProto = location.protocol === 'https:' ? 'https:' : 'http:';
+      try {
+        const res = await fetch(`${httpProto}//${host}/auth/verify?token=${encodeURIComponent(token)}`);
+        if (!res.ok) {
+          localStorage.removeItem(TOKEN_KEY);
+          state.intentionalDisc = true;
+          appendBanner('Session expirée. Reconnecte-toi.');
+          loginScreen.style.display = 'flex';
+          chatScreen.style.display  = 'none';
+          messageInput.value = '';
+          return;
+        }
+      } catch (_) { /* keep going */ }
+
+      connectWS(token);
+    })();
+
     state.reconnectDelay = Math.min(state.reconnectDelay * 2, 30000);
   }, state.reconnectDelay);
 };

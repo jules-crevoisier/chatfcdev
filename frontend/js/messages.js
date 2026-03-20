@@ -278,7 +278,12 @@ const appendMessageToDOM = (msg, animate, prevMsg) => {
   if (msg.file) {
     const att = document.createElement('div');
     att.className = 'file-attachment';
-    if (msg.file.is_image) {
+    const filenameLower = String(msg.file.filename || '').toLowerCase();
+    const urlLower = String(msg.file.url || '').toLowerCase();
+    const allowInlineImage = msg.file.is_image
+      && !filenameLower.endsWith('.svg')
+      && !urlLower.endsWith('.svg');
+    if (allowInlineImage) {
       const img = document.createElement('img');
       img.src = serverUrl(msg.file.url); img.alt = msg.file.filename;
       img.addEventListener('click', () => openLightbox(serverUrl(msg.file.url)));

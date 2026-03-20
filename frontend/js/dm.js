@@ -6,11 +6,11 @@ import {
   usersList, userCount, offlineSection, offlineList, dmFileUpload,
   notifBadge, mentionCountEl, messageInput, replyBar, replyBarText,
 } from './dom.js';
-import { send, colorFor, serverUrl, now, escHtml } from './helpers.js';
+import { send, colorFor, serverUrl, now, escHtml, resolveHost } from './helpers.js';
 import { openLightbox } from './notifications.js';
 import { playBeep } from './helpers.js';
 import { saveView } from './channels.js';
-import { MAX_UPLOAD } from './constants.js';
+import { MAX_UPLOAD, TOKEN_KEY } from './constants.js';
 import { systemMsg, formatContent, cancelReply } from './messages.js';
 import { renderReactions, showEmojiPicker } from './emoji.js';
 
@@ -266,7 +266,12 @@ const appendDmMessageEl = (msg, animate, prevMsg) => {
     const att = document.createElement('div');
     att.className = 'file-attachment';
 
-    if (msg.file.is_image) {
+    const filenameLower = String(msg.file.filename || '').toLowerCase();
+    const urlLower = String(msg.file.url || '').toLowerCase();
+    const allowInlineImage = msg.file.is_image
+      && !filenameLower.endsWith('.svg')
+      && !urlLower.endsWith('.svg');
+    if (allowInlineImage) {
       const img = document.createElement('img');
       img.src = serverUrl(msg.file.url);
       img.alt = msg.file.filename;
@@ -403,12 +408,41 @@ export const handleDmMessage = (msg) => {
 const uploadFileDm = async (file) => {
   if (!state.activeDm) return;
   const fd = new FormData(); fd.append('file', file);
+
+  const readErrorMessage = async (res) => {
+    // Axum renvoie souvent un String (pas du JSON). On lit une seule fois en text,
+    // puis on tente de parser en JSON si possible.
+    let txt = '';
+    try { txt = await res.text(); } catch (_) {}
+    txt = (txt || '').trim();
+    if (!txt) return `HTTP ${res.status}`;
+
+    try {
+      const data = JSON.parse(txt);
+      if (data?.error) return String(data.error);
+      if (data?.message) return String(data.message);
+      return JSON.stringify(data);
+    } catch (_) {
+      return txt;
+    }
+  };
+
   try {
-    const host      = (await import('./helpers.js')).resolveHost();
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) throw new Error('Unauthorized: missing token');
+    const host      = resolveHost();
     const httpProto = location.protocol === 'https:' ? 'https:' : 'http:';
-    const res = await fetch(`${httpProto}//${host}/upload`, { method: 'POST', body: fd });
-    if (res.status === 413) throw new Error('Fichier trop lourd (max 20 Mo)');
-    if (!res.ok)            throw new Error(`HTTP ${res.status}`);
+    const res = await fetch(
+      `${httpProto}//${host}/upload?token=${encodeURIComponent(token)}`,
+      { method: 'POST', body: fd }
+    );
+    if (!res.ok) {
+      const serverMsg = await readErrorMessage(res);
+      if (res.status === 413 && serverMsg.toLowerCase().includes('lourd')) {
+        throw new Error(serverMsg);
+      }
+      throw new Error(serverMsg || `HTTP ${res.status}`);
+    }
     const data = await res.json();
     send({
       type:    'direct_message',
