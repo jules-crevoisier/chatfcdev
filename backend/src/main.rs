@@ -20,7 +20,7 @@ use futures::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
     Row as SqlxRow,
     SqlitePool,
 };
@@ -56,7 +56,10 @@ async fn init_db() -> SqlitePool {
     let opts = SqliteConnectOptions::new()
         .filename(&db_path)
         .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal);
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5))
+        .statement_cache_capacity(256);
 
     let pool = SqlitePool::connect_with(opts)
         .await
@@ -129,9 +132,9 @@ async fn init_db() -> SqlitePool {
         "CREATE INDEX IF NOT EXISTS idx_dm_participants ON direct_messages(from_user, to_user, created_at)"
     ).execute(&pool).await.expect("create dm index");
 
-    // Migration: add `file` column to direct_messages for existing databases.
-    let _ = sqlx::query("ALTER TABLE direct_messages ADD COLUMN file TEXT")
-        .execute(&pool).await;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_dm_participants_rev ON direct_messages(to_user, from_user, created_at)"
+    ).execute(&pool).await.expect("create reverse dm index");
 
     pool
 }
@@ -955,6 +958,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, username: String
     // Task: broadcast + DM → client
     // `biased`: always drain session-specific (dm_rx) first so load_dm / switch_channel answers
     // are not delayed behind a busy public broadcast channel (same class of bug as stale history).
+    let username_for_send_task = username.clone();
     let mut send_task = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -965,7 +969,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, username: String
                 },
                 result = rx.recv() => match result {
                     Ok(msg) => { if sender.send(Message::Text(msg)).await.is_err() { break; } }
-                    Err(_)  => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::debug!(user = %username_for_send_task, skipped, "broadcast receiver lagged");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },
             }
         }
