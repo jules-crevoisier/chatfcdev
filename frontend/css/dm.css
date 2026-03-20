@@ -43,14 +43,16 @@
 #dm-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 12px;
+  padding: 8px 0 4px;
+  scroll-behavior: smooth;
+  position: relative;
 }
 
 .dm-message {
   margin: 4px 0;
   display: flex;
   gap: 8px;
-  align-items: baseline;
+  align-items: flex-start;
   flex-wrap: wrap;
   font-size: 14px;
 }
@@ -82,6 +84,12 @@
   min-width: 0;
 }
 
+/* Show message action buttons on DM hover (messages.css expects .message:hover). */
+.dm-message:hover .msg-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .dm-msg-image {
   max-width: 280px;
   max-height: 200px;
@@ -89,6 +97,11 @@
   object-fit: contain;
   border: 1px solid var(--border);
   margin-top: 2px;
+}
+
+/* Avoid extra vertical offset so the username doesn't look "below" the GIF. */
+.dm-message .inline-gif {
+  margin-top: 0;
 }
 
 .dm-msg-file-link {

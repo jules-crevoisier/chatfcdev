@@ -139,6 +139,11 @@ export const applyEdit = (msgId, content) => {
     const m = msgs.find(m => m.id === msgId);
     if (m) { m.content = content; m.edited = true; break; }
   }
+  // Also update cached DM thread entries (used when re-opening the DM panel).
+  for (const dms of state.dmConvos.values()) {
+    const m = dms.find(m => m.id === msgId);
+    if (m) { m.content = content; m.edited = true; break; }
+  }
 };
 
 const deleteMessage = (msgId) => {
@@ -153,6 +158,11 @@ export const applyDelete = (msgId) => {
   for (const msgs of state.channelMessages.values()) {
     const idx = msgs.findIndex(m => m.id === msgId);
     if (idx !== -1) { msgs.splice(idx, 1); break; }
+  }
+  // Also update cached DM thread entries (used when re-opening the DM panel).
+  for (const dms of state.dmConvos.values()) {
+    const idx = dms.findIndex(m => m.id === msgId);
+    if (idx !== -1) { dms.splice(idx, 1); break; }
   }
 };
 

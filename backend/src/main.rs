@@ -119,14 +119,22 @@ async fn init_db() -> SqlitePool {
             to_user    TEXT NOT NULL,
             content    TEXT NOT NULL,
             timestamp  TEXT NOT NULL,
+            reactions  TEXT NOT NULL DEFAULT '{}',
+            edited     INTEGER NOT NULL DEFAULT 0,
             file       TEXT,
             created_at INTEGER NOT NULL DEFAULT (unixepoch())
         )"
     ).execute(&pool).await.expect("create direct_messages table");
 
-    // Migration: add `file` column for databases created before this column existed.
+    // Migrations: add columns for databases created before these fields existed.
     let _ = sqlx::query("ALTER TABLE direct_messages ADD COLUMN file TEXT")
         .execute(&pool).await;
+    let _ = sqlx::query(
+        "ALTER TABLE direct_messages ADD COLUMN reactions TEXT NOT NULL DEFAULT '{}'"
+    ).execute(&pool).await;
+    let _ = sqlx::query(
+        "ALTER TABLE direct_messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0"
+    ).execute(&pool).await;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_dm_participants ON direct_messages(from_user, to_user, created_at)"
@@ -365,6 +373,26 @@ async fn db_delete_message(pool: &SqlitePool, msg_id: &str) {
         .bind(msg_id).execute(pool).await;
 }
 
+async fn db_update_dm_reactions(pool: &SqlitePool, msg_id: &str, reactions: &HashMap<String, Vec<String>>) {
+    let json = serde_json::to_string(reactions).unwrap_or_else(|_| "{}".to_string());
+    let _ = sqlx::query("UPDATE direct_messages SET reactions=?1 WHERE id=?2")
+        .bind(json)
+        .bind(msg_id)
+        .execute(pool)
+        .await;
+}
+
+async fn db_get_dm_reactions(pool: &SqlitePool, msg_id: &str) -> Option<HashMap<String, Vec<String>>> {
+    let row = sqlx::query("SELECT reactions FROM direct_messages WHERE id=?1")
+        .bind(msg_id)
+        .fetch_optional(pool)
+        .await
+        .ok()?;
+    let row = row?;
+    let json: String = row.try_get("reactions").ok()?;
+    serde_json::from_str(&json).ok()
+}
+
 // ── SQLite – direct messages ───────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -374,16 +402,22 @@ struct DmRecord {
     to_user:   String,
     content:   String,
     timestamp: String,
+    reactions: HashMap<String, Vec<String>>,
+    edited:    bool,
     file:      Option<String>, // JSON-serialized FileAttachment
 }
 
 async fn db_save_dm(pool: &SqlitePool, dm: &DmRecord) -> Result<(), sqlx::Error> {
+    let reactions_json = serde_json::to_string(&dm.reactions).unwrap_or_else(|_| "{}".to_string());
+    let edited_int = if dm.edited { 1i64 } else { 0i64 };
     sqlx::query(
-        "INSERT INTO direct_messages (id, from_user, to_user, content, timestamp, file)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+        "INSERT INTO direct_messages (id, from_user, to_user, content, timestamp, reactions, edited, file)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
     )
     .bind(&dm.id).bind(&dm.from_user).bind(&dm.to_user)
-    .bind(&dm.content).bind(&dm.timestamp).bind(&dm.file)
+    .bind(&dm.content).bind(&dm.timestamp)
+    .bind(reactions_json).bind(edited_int)
+    .bind(&dm.file)
     .execute(pool).await?;
     Ok(())
 }
@@ -392,7 +426,7 @@ async fn db_save_dm(pool: &SqlitePool, dm: &DmRecord) -> Result<(), sqlx::Error>
 /// returned in chronological order.
 async fn db_load_dms(pool: &SqlitePool, username: &str, limit: i64) -> Vec<DmRecord> {
     let result = sqlx::query(
-        "SELECT id, from_user, to_user, content, timestamp, file
+        "SELECT id, from_user, to_user, content, timestamp, reactions, edited, file
          FROM (
              SELECT *, rowid AS _rowid FROM direct_messages
              WHERE from_user=?1 OR to_user=?1
@@ -413,6 +447,10 @@ async fn db_load_dms(pool: &SqlitePool, username: &str, limit: i64) -> Vec<DmRec
         to_user:   row.try_get("to_user").ok()?,
         content:   row.try_get("content").ok()?,
         timestamp: row.try_get("timestamp").ok()?,
+        reactions: row.try_get::<String, _>("reactions").ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
+        edited: row.try_get::<i64, _>("edited").ok().map(|v| v != 0).unwrap_or(false),
         file:      row.try_get("file").ok().flatten(),
     })).collect()
 }
@@ -420,7 +458,7 @@ async fn db_load_dms(pool: &SqlitePool, username: &str, limit: i64) -> Vec<DmRec
 /// All DMs between two users, newest-first window then chronological, up to `limit` rows.
 async fn db_load_dm_thread(pool: &SqlitePool, user_a: &str, user_b: &str, limit: i64) -> Vec<DmRecord> {
     let rows = sqlx::query(
-        "SELECT id, from_user, to_user, content, timestamp, file
+        "SELECT id, from_user, to_user, content, timestamp, reactions, edited, file
          FROM (
              SELECT *, rowid AS _rowid FROM direct_messages
              WHERE (from_user=?1 AND to_user=?2) OR (from_user=?2 AND to_user=?1)
@@ -437,6 +475,10 @@ async fn db_load_dm_thread(pool: &SqlitePool, user_a: &str, user_b: &str, limit:
         to_user:   row.try_get("to_user").ok()?,
         content:   row.try_get("content").ok()?,
         timestamp: row.try_get("timestamp").ok()?,
+        reactions: row.try_get::<String, _>("reactions").ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
+        edited: row.try_get::<i64, _>("edited").ok().map(|v| v != 0).unwrap_or(false),
         file:      row.try_get("file").ok().flatten(),
     })).collect()
 }
@@ -566,7 +608,7 @@ enum ServerMsg {
     Reaction     { message_id: String, reactions: HashMap<String, Vec<String>> },
     MessageEdited  { message_id: String, content: String },
     MessageDeleted { message_id: String },
-    DirectMessage  { id: String, from: String, to: String, content: String, timestamp: String, #[serde(skip_serializing_if = "Option::is_none")] file: Option<FileAttachment> },
+    DirectMessage  { id: String, from: String, to: String, content: String, timestamp: String, reactions: HashMap<String, Vec<String>>, edited: bool, #[serde(skip_serializing_if = "Option::is_none")] file: Option<FileAttachment> },
     TopicChanged   { content: String, channel: String },
     Typing         { username: String, channel: String },
     ChannelList    { channels: Vec<ChannelInfo> },
@@ -586,6 +628,8 @@ struct DmHistoryEntry {
     to:        String,
     content:   String,
     timestamp: String,
+    reactions: HashMap<String, Vec<String>>,
+    edited:    bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     file:      Option<FileAttachment>,
 }
@@ -599,6 +643,8 @@ fn dm_record_to_history_entry(dm: DmRecord) -> DmHistoryEntry {
         to:        dm.to_user,
         content:   dm.content,
         timestamp: dm.timestamp,
+        reactions: dm.reactions,
+        edited:    dm.edited,
         file,
     }
 }
@@ -1074,7 +1120,7 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
                 let reactions_opt = {
                     let mut msgs = arc.lock().await;
                     if let Some(msg) = msgs.iter_mut().find(|m| m.id == message_id) {
-                        let users = msg.reactions.entry(emoji).or_default();
+                        let users = msg.reactions.entry(emoji.clone()).or_default();
                         if let Some(pos) = users.iter().position(|u| u == username) { users.remove(pos); }
                         else if users.len() < 100 { users.push(username.to_string()); }
                         Some(msg.reactions.clone())
@@ -1083,9 +1129,20 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
                 if let Some(reactions) = reactions_opt {
                     let db = state.db.clone(); let mid = message_id.clone(); let r = reactions.clone();
                     tokio::spawn(async move { db_update_reactions(&db, &mid, &r).await; });
-                    if let Ok(json) = serde_json::to_string(&ServerMsg::Reaction { message_id, reactions }) {
+                    if let Ok(json) = serde_json::to_string(&ServerMsg::Reaction { message_id: message_id.clone(), reactions }) {
                         let _ = state.tx.send(json);
                     }
+                }
+            } else {
+                // Reaction on DM message (stored in direct_messages table).
+                let Some(mut reactions) = db_get_dm_reactions(&state.db, &message_id).await else { return; };
+                let users = reactions.entry(emoji).or_default();
+                if let Some(pos) = users.iter().position(|u| u == username) { users.remove(pos); }
+                else if users.len() < 100 { users.push(username.to_string()); }
+
+                db_update_dm_reactions(&state.db, &message_id, &reactions).await;
+                if let Ok(json) = serde_json::to_string(&ServerMsg::Reaction { message_id: message_id.clone(), reactions }) {
+                    let _ = state.tx.send(json);
                 }
             }
         }
@@ -1119,6 +1176,7 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
         // ── Edit (own only) ────────────────────────────────────────
         ClientMsg::EditMessage { message_id, content } => {
             if content.is_empty() || content.len() > 2000 { return; }
+            let mut did_edit = false;
             if let Some(arc) = find_message_arc(state, &message_id).await {
                 let edited = {
                     let mut msgs = arc.lock().await;
@@ -1127,9 +1185,29 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
                     } else { false }
                 };
                 if edited {
+                    did_edit = true;
                     let db = state.db.clone(); let mid = message_id.clone(); let c = content.clone();
                     tokio::spawn(async move { db_edit_message(&db, &mid, &c).await; });
-                    if let Ok(json) = serde_json::to_string(&ServerMsg::MessageEdited { message_id, content }) {
+                    if let Ok(json) = serde_json::to_string(&ServerMsg::MessageEdited { message_id: message_id.clone(), content: content.clone() }) {
+                        let _ = state.tx.send(json);
+                    }
+                }
+            }
+
+            if !did_edit {
+                // Edit DM message (own only).
+                let res = sqlx::query(
+                    "UPDATE direct_messages SET content=?1, edited=1 WHERE id=?2 AND from_user=?3"
+                )
+                .bind(&content)
+                .bind(&message_id)
+                .bind(username)
+                .execute(&state.db)
+                .await;
+
+                let edited_dm = res.map(|r| r.rows_affected() > 0).unwrap_or(false);
+                if edited_dm {
+                    if let Ok(json) = serde_json::to_string(&ServerMsg::MessageEdited { message_id: message_id.clone(), content: content.clone() }) {
                         let _ = state.tx.send(json);
                     }
                 }
@@ -1138,6 +1216,7 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
 
         // ── Delete (own only) ──────────────────────────────────────
         ClientMsg::DeleteMessage { message_id } => {
+            let mut did_delete = false;
             if let Some(arc) = find_message_arc(state, &message_id).await {
                 let deleted = {
                     let mut msgs = arc.lock().await;
@@ -1146,9 +1225,28 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
                     } else { false }
                 };
                 if deleted {
+                    did_delete = true;
                     let db = state.db.clone(); let mid = message_id.clone();
                     tokio::spawn(async move { db_delete_message(&db, &mid).await; });
-                    if let Ok(json) = serde_json::to_string(&ServerMsg::MessageDeleted { message_id }) {
+                    if let Ok(json) = serde_json::to_string(&ServerMsg::MessageDeleted { message_id: message_id.clone() }) {
+                        let _ = state.tx.send(json);
+                    }
+                }
+            }
+
+            if !did_delete {
+                // Delete DM message (own only).
+                let res = sqlx::query(
+                    "DELETE FROM direct_messages WHERE id=?1 AND from_user=?2"
+                )
+                .bind(&message_id)
+                .bind(username)
+                .execute(&state.db)
+                .await;
+
+                let deleted_dm = res.map(|r| r.rows_affected() > 0).unwrap_or(false);
+                if deleted_dm {
+                    if let Ok(json) = serde_json::to_string(&ServerMsg::MessageDeleted { message_id: message_id.clone() }) {
                         let _ = state.tx.send(json);
                     }
                 }
@@ -1183,6 +1281,8 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
                 to_user:   to_canonical.clone(),
                 content:   content.clone(),
                 timestamp: ts.clone(),
+                reactions: HashMap::new(),
+                edited:    false,
                 file:      file_json,
             };
 
@@ -1202,6 +1302,8 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
                 to:        to_canonical.clone(),
                 content,
                 timestamp: ts,
+                reactions: HashMap::new(),
+                edited:    false,
                 file,
             }) { Ok(j) => j, Err(_) => return };
 

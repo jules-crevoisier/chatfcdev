@@ -4,17 +4,26 @@ import state from './state.js';
 import {
   dmPanel, dmClose, dmTitle, dmStatus, dmMessages, dmInput, dmSend,
   usersList, userCount, offlineSection, offlineList, dmFileUpload,
+  notifBadge, mentionCountEl, messageInput,
 } from './dom.js';
-import { send, colorFor, serverUrl, now, escHtml } from './helpers.js';
+import { send, colorFor, serverUrl, now } from './helpers.js';
 import { openLightbox } from './notifications.js';
 import { playBeep } from './helpers.js';
 import { saveView } from './channels.js';
 import { MAX_UPLOAD } from './constants.js';
-import { systemMsg } from './messages.js';
-import { messageInput } from './dom.js';
+import { systemMsg, formatContent } from './messages.js';
+import { renderReactions, showEmojiPicker } from './emoji.js';
 
 const dmSameUser = (a, b) =>
   a != null && b != null && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+
+const mentionsMe = (content) =>
+  new RegExp(`@${state.myUsername}\\b`, 'i').test(content || '');
+
+const insertMention = (username) => {
+  dmInput.value += `@${username} `;
+  dmInput.focus();
+};
 
 // ── Users list ───────────────────────────────────────────────────
 export const renderUsers = (online, offline) => {
@@ -92,69 +101,191 @@ const sendDm = () => {
 };
 
 // ── DM message rendering ─────────────────────────────────────────
-const appendDmMessageEl = (msg, scroll) => {
-  const div = document.createElement('div');
-  div.className = 'dm-message' + (dmSameUser(msg.from, state.myUsername) ? ' dm-mine' : '');
+const makeActBtn = (label, title, extraClass, handler) => {
+  const btn = document.createElement('button');
+  btn.className = `msg-act${extraClass ? ' ' + extraClass : ''}`;
+  btn.textContent = label;
+  btn.title = title;
+  btn.addEventListener('click', handler);
+  return btn;
+};
 
-  const u = document.createElement('span');
-  u.className = 'dm-msg-user';
-  u.textContent = `<${msg.from}>`;
-  u.style.color = colorFor(msg.from);
+const editDmMessage = (row) => {
+  const contentEl = row.querySelector('.msg-content');
+  if (!contentEl) return;
+  const rawText = row.dataset.raw || '';
+  const savedHTML = contentEl.innerHTML;
 
-  const body = document.createElement('span');
-  body.className = 'dm-msg-body';
+  const wrap = document.createElement('div');
+  wrap.className = 'edit-wrap';
+
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.className = 'edit-input';
+  inp.value = rawText;
+
+  const okBtn = document.createElement('button');
+  okBtn.className = 'edit-ok';
+  okBtn.textContent = '✓';
+
+  const cxBtn = document.createElement('button');
+  cxBtn.className = 'edit-cancel';
+  cxBtn.textContent = '✕';
+
+  wrap.appendChild(inp);
+  wrap.appendChild(okBtn);
+  wrap.appendChild(cxBtn);
+  contentEl.innerHTML = '';
+  contentEl.appendChild(wrap);
+
+  inp.focus();
+  inp.select();
+
+  const confirm = () => {
+    const nc = inp.value.trim();
+    if (nc && nc !== rawText) {
+      send({ type: 'edit_message', message_id: row.dataset.id, content: nc });
+    } else {
+      contentEl.innerHTML = savedHTML;
+    }
+  };
+
+  const cancel = () => {
+    contentEl.innerHTML = savedHTML;
+  };
+
+  okBtn.addEventListener('click', confirm);
+  cxBtn.addEventListener('click', cancel);
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); confirm(); }
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  });
+};
+
+const deleteDmMessage = (msgId) => {
+  if (!confirm('Supprimer ce message ?')) return;
+  send({ type: 'delete_message', message_id: msgId });
+};
+
+const appendDmMessageEl = (msg, animate, prevMsg) => {
+  const isMine = dmSameUser(msg.from, state.myUsername);
+  const isMentioned = !isMine && mentionsMe(msg.content);
+  const shouldGroup = !!prevMsg
+    && !prevMsg._isSystem
+    && dmSameUser(prevMsg.from, msg.from)
+    && prevMsg.ts === msg.ts
+    && !msg.reply_to;
+
+  const row = document.createElement('div');
+  row.className = 'message' + (animate ? ' new' : '') + (shouldGroup ? ' grouped' : '');
+  row.dataset.id = msg.id;
+  row.dataset.raw = msg.content || '';
+  row.dataset.username = msg.from;
+  if (isMentioned) row.classList.add('mentioned');
+
+  if (isMentioned && animate) {
+    state.mentionCount++;
+    mentionCountEl.textContent = state.mentionCount;
+    notifBadge.style.display = 'inline';
+    document.title = `(${state.mentionCount}) ChatFC`;
+    playBeep();
+  }
+
+  const header = document.createElement('div');
+  header.className = 'msg-header';
+
+  const uSpan = document.createElement('span');
+  uSpan.className = 'msg-username';
+  uSpan.textContent = msg.from;
+  uSpan.style.color = colorFor(msg.from);
+  uSpan.title = 'Click to mention';
+  uSpan.addEventListener('click', () => insertMention(msg.from));
+  if (!shouldGroup) header.appendChild(uSpan);
+
+  const actions = document.createElement('div');
+  actions.className = 'msg-actions';
+
+  const reactBtn = document.createElement('button');
+  reactBtn.className = 'msg-act';
+  reactBtn.title = 'Réagir';
+  reactBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><circle cx="9" cy="9.5" r=".8" fill="currentColor" stroke="none"/><circle cx="15" cy="9.5" r=".8" fill="currentColor" stroke="none"/></svg>`;
+  reactBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    showEmojiPicker(msg.id, reactBtn);
+  });
+  actions.appendChild(reactBtn);
+
+  if (isMine) {
+    actions.appendChild(makeActBtn('✎', 'Modifier', '', () => editDmMessage(row)));
+    actions.appendChild(makeActBtn('🗑', 'Supprimer', 'del', () => deleteDmMessage(msg.id)));
+  }
+
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  body.appendChild(header);
 
   if (msg.file) {
+    const att = document.createElement('div');
+    att.className = 'file-attachment';
+
     if (msg.file.is_image) {
       const img = document.createElement('img');
       img.src = serverUrl(msg.file.url);
       img.alt = msg.file.filename;
-      img.className = 'dm-msg-image';
-      img.style.cursor = 'pointer';
       img.addEventListener('click', () => openLightbox(serverUrl(msg.file.url)));
-      body.appendChild(img);
+      att.appendChild(img);
     } else {
-      const a = document.createElement('a');
-      a.href = serverUrl(msg.file.url);
-      a.textContent = `📎 ${msg.file.filename}`;
-      a.target = '_blank';
-      a.className = 'dm-msg-file-link';
-      body.appendChild(a);
+      const link = document.createElement('a');
+      link.href = serverUrl(msg.file.url);
+      link.download = msg.file.filename;
+      link.className = 'file-link';
+      link.textContent = `📄 ${msg.file.filename}`;
+      att.appendChild(link);
     }
-    if (msg.content) {
-      const caption = document.createElement('div');
-      caption.className = 'dm-msg-content';
-      caption.textContent = msg.content;
-      body.appendChild(caption);
-    }
-  } else {
-    const isImgUrl = /\.(gif|jpg|jpeg|png|webp)(\?|$)/i.test(msg.content)
-                  || msg.content.includes('media.tenor.com');
-    if (isImgUrl) {
-      const img = document.createElement('img');
-      img.src = msg.content;
-      img.alt = 'image';
-      img.className = 'dm-msg-image';
-      img.style.cursor = 'pointer';
-      img.addEventListener('click', () => openLightbox(msg.content));
-      body.appendChild(img);
-    } else {
-      const c = document.createElement('span');
-      c.className = 'dm-msg-content';
-      c.textContent = msg.content;
-      body.appendChild(c);
-    }
+    body.appendChild(att);
   }
 
-  const t = document.createElement('span');
-  t.className = 'dm-msg-ts';
-  t.textContent = msg.ts;
+  const isAutoFilename = msg.file && (
+    !msg.content ||
+    msg.content === `📎 ${msg.file.filename}` ||
+    msg.content === `📄 ${msg.file.filename}`
+  );
 
-  div.appendChild(u);
-  div.appendChild(body);
-  div.appendChild(t);
-  dmMessages.appendChild(div);
-  if (scroll) dmMessages.scrollTop = dmMessages.scrollHeight;
+  if (!isAutoFilename) {
+    const contentEl = document.createElement('div');
+    contentEl.className = 'msg-content';
+    contentEl.innerHTML = formatContent(msg.content || '');
+    if (msg.edited) {
+      const tag = document.createElement('span');
+      tag.className = 'edited-tag';
+      tag.textContent = '(edited)';
+      contentEl.appendChild(tag);
+    }
+    body.appendChild(contentEl);
+  }
+
+  const reactionsDiv = document.createElement('div');
+  reactionsDiv.className = 'reactions';
+  reactionsDiv.id = `r-${msg.id}`;
+  renderReactions(reactionsDiv, msg.reactions || {}, msg.id);
+  body.appendChild(reactionsDiv);
+
+  const tsSpan = document.createElement('span');
+  tsSpan.className = 'msg-timestamp';
+  tsSpan.textContent = msg.ts;
+  if (!shouldGroup) header.appendChild(tsSpan);
+
+  if (shouldGroup) {
+    actions.className = 'msg-actions msg-actions-abs';
+    row.appendChild(actions);
+  } else {
+    actions.className = 'msg-actions';
+    header.appendChild(actions);
+  }
+
+  row.appendChild(body);
+  dmMessages.appendChild(row);
+  if (animate) dmMessages.scrollTop = dmMessages.scrollHeight;
 };
 
 // ── Inbound handlers ─────────────────────────────────────────────
@@ -165,14 +296,16 @@ export const handleDmHistory = (dms) => {
     state.dmSeenIds.add(dm.id);
     const partner = dmSameUser(dm.from, state.myUsername) ? dm.to : dm.from;
     const entry = { id: dm.id, from: dm.from, to: dm.to, content: dm.content,
-                    ts: dm.timestamp || now(), file: dm.file || null };
+                    ts: dm.timestamp || now(), file: dm.file || null,
+                    reactions: dm.reactions || {}, edited: !!dm.edited };
     if (!state.dmConvos.has(partner)) state.dmConvos.set(partner, []);
     state.dmConvos.get(partner).push(entry);
   });
   renderUsers(state.allUsers.online, state.allUsers.offline);
   if (state.activeDm) {
     dmMessages.innerHTML = '';
-    (state.dmConvos.get(state.activeDm) || []).forEach(m => appendDmMessageEl(m, false));
+    const list = state.dmConvos.get(state.activeDm) || [];
+    list.forEach((m, i) => appendDmMessageEl(m, false, i > 0 ? list[i - 1] : null));
     dmMessages.scrollTop = dmMessages.scrollHeight;
   }
 };
@@ -186,6 +319,7 @@ export const handleDmThread = (partner, dms) => {
     list.push({
       id: dm.id, from: dm.from, to: dm.to, content: dm.content,
       ts: dm.timestamp || now(), file: dm.file || null,
+      reactions: dm.reactions || {}, edited: !!dm.edited,
     });
   });
   state.dmConvos.set(partner, list);
@@ -193,7 +327,7 @@ export const handleDmThread = (partner, dms) => {
     state.activeDm = partner;
     dmTitle.textContent = `@${partner}`;
     dmMessages.innerHTML = '';
-    list.forEach(m => appendDmMessageEl(m, false));
+    list.forEach((m, i) => appendDmMessageEl(m, false, i > 0 ? list[i - 1] : null));
     dmMessages.scrollTop = dmMessages.scrollHeight;
   }
   renderUsers(state.allUsers.online, state.allUsers.offline);
@@ -207,13 +341,16 @@ export const handleDmMessage = (msg) => {
 
   const partner = dmSameUser(msg.from, state.myUsername) ? msg.to : msg.from;
   const ts    = msg.timestamp || now();
-  const entry = { id: msg.id, from: msg.from, to: msg.to, content: msg.content, ts, file: msg.file || null };
+  const entry = { id: msg.id, from: msg.from, to: msg.to, content: msg.content, ts, file: msg.file || null,
+                    reactions: msg.reactions || {}, edited: !!msg.edited };
 
   if (!state.dmConvos.has(partner)) state.dmConvos.set(partner, []);
-  state.dmConvos.get(partner).push(entry);
+  const list = state.dmConvos.get(partner);
+  const prevMsg = list.length > 0 ? list[list.length - 1] : null;
+  list.push(entry);
 
   if (state.activeDm != null && dmSameUser(state.activeDm, partner)) {
-    appendDmMessageEl(entry, true);
+    appendDmMessageEl(entry, true, prevMsg);
   } else if (!dmSameUser(msg.from, state.myUsername)) {
     state.dmUnread.set(partner, (state.dmUnread.get(partner) || 0) + 1);
     renderUsers(state.allUsers.online, state.allUsers.offline);
