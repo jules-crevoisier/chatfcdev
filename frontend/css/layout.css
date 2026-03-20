@@ -113,15 +113,36 @@
 
 #offline-list li:hover { color: var(--text2); background: var(--bg3); }
 
-/* ── Theme dots row ─────────────────────────────────────────────── */
+/* ── Theme groups + dots ────────────────────────────────────────── */
+.theme-groups {
+  border-top: 1px solid var(--border);
+  padding: 6px 0 4px;
+  flex-shrink: 0;
+}
+
+.theme-group {
+  padding: 0 10px 4px;
+}
+
+.theme-group + .theme-group {
+  margin-top: 3px;
+  border-top: 1px dashed var(--border);
+  padding-top: 5px;
+}
+
+.theme-group-title {
+  color: var(--dim);
+  font-size: 8px;
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+}
+
 .theme-row {
   display: flex;
   gap: 6px;
-  padding: 7px 10px;
-  border-top: 1px solid var(--border);
+  padding: 0;
   align-items: center;
   flex-wrap: wrap;
-  flex-shrink: 0;
 }
 
 .theme-dot {

@@ -92,7 +92,12 @@
 }
 
 /* system message */
-.message.system-msg { opacity: .55; font-style: italic; }
+.message.system-msg {
+  opacity: .55;
+  font-style: italic;
+  transition: opacity .5s ease;
+}
+.message.system-msg.auto-fading { opacity: 0; }
 .message.system-msg .msg-avatar {
   align-items: flex-start;
   padding-top: 2px;

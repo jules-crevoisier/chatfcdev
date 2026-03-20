@@ -10,6 +10,10 @@ import { playBeep } from './helpers.js';
 import { notifBadge, mentionCountEl } from './dom.js';
 import { renderChannelTabs } from './channels.js';
 
+const EPHEMERAL_SYSTEM_MSG_REGEX = /\b(joined|left) the chat\b/i;
+const JOINED_CHAT_FADE_DELAY_MS = 12000;
+const JOINED_CHAT_FADE_DURATION_MS = 500;
+
 // ── Content formatting ───────────────────────────────────────────
 export const formatContent = (raw) => {
   const trimmed = raw.trim();
@@ -335,6 +339,17 @@ export const systemMsg = (text) => {
   row.appendChild(body);
   messagesList.appendChild(row);
   scrollToBottom();
+
+  // Keep join notifications visible briefly, then fade them out.
+  if (EPHEMERAL_SYSTEM_MSG_REGEX.test(text)) {
+    window.setTimeout(() => {
+      if (!row.isConnected) return;
+      row.classList.add('auto-fading');
+      window.setTimeout(() => {
+        if (row.isConnected) row.remove();
+      }, JOINED_CHAT_FADE_DURATION_MS);
+    }, JOINED_CHAT_FADE_DELAY_MS);
+  }
 };
 
 export const appendBanner = (text) => {
