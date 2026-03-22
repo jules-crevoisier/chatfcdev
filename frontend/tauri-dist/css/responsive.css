@@ -1,0 +1,58 @@
+/* ── Mobile ─────────────────────────────────────────────────────── */
+@media (max-width: 620px) {
+  #chat-screen { flex-direction: column; }
+  #sidebar {
+    width: 100%;
+    max-height: 120px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    flex-direction: row;
+  }
+  .sidebar-header { writing-mode: horizontal-tb; }
+  .users-container {
+    position: relative;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .users-container::-webkit-scrollbar { display: none; }
+  .users-container::before,
+  .users-container::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 14px;
+    pointer-events: none;
+    z-index: 1;
+  }
+  .users-container::before {
+    left: 0;
+    background: linear-gradient(to right, var(--bg2), transparent);
+  }
+  .users-container::after {
+    right: 0;
+    background: linear-gradient(to left, var(--bg2), transparent);
+  }
+  #users-list {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 4px;
+    padding: 4px 8px;
+    width: max-content;
+  }
+  #users-list li { padding: 2px 6px; font-size: 11px; }
+  #message-input::placeholder {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 12px;
+  }
+  .theme-groups, .theme-row { display: none; }
+  .sidebar-footer { padding: 4px 6px; }
+  #offline-section { display: none !important; }
+
+  .ascii-logo { font-size: 5px; }
+  .login-box { padding: 20px; }
+}

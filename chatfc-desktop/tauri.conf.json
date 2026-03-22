@@ -1,0 +1,19 @@
+{
+  "productName": "ChatFC",
+  "version": "0.1.0",
+  "identifier": "com.chatfc.desktop",
+  "build": {
+    "frontendDist": "../frontend/tauri-dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "ChatFC",
+        "width": 1100,
+        "height": 720,
+        "resizable": true
+      }
+    ]
+  }
+}
+

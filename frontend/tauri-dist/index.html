@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ChatFC</title>
+  <!-- Chemins relatifs : évite les problèmes dans un chargement desktop -->
+  <link rel="stylesheet" href="./style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%2300ff41'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-size='18' fill='%230a0a0a'%3E%23%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+
+<!-- ── LOGIN ─────────────────────────────────────────────────────── -->
+<div id="login-screen">
+  <div class="login-box">
+    <pre class="ascii-logo">
+ ██████╗██╗  ██╗ █████╗ ████████╗███████╗███████╗███████╗███████╗
+██╔════╝██║  ██║██╔══██╗╚══██╔══╝██╔════╝██╔════╝██╔════╝██╔════╝
+██║     ███████║███████║   ██║   █████╗  ██║     █████╗  █████╗
+██║     ██╔══██║██╔══██║   ██║   ██╔══╝  ██║     ██╔══╝  ██╔══╝
+╚██████╗██║  ██║██║  ██║   ██║   ██║     ╚██████╗██║     ╚██████╗
+ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝      ╚═════╝╚═╝      ╚═════╝</pre>
+    <div class="login-subtitle">[ connecting to home server ]</div>
+
+    <form id="auth-form" autocomplete="on" novalidate>
+      <!-- Auth mode tabs -->
+      <div class="auth-tabs">
+        <button type="button" id="tab-login" class="auth-tab active">[ LOGIN ]</button>
+        <button type="button" id="tab-register" class="auth-tab">[ REGISTER ]</button>
+      </div>
+
+      <div class="login-field">
+        <span class="login-prompt">username:~$</span>
+        <input type="text" id="username-input" name="username" placeholder="_" maxlength="24" autocomplete="username" autofocus>
+      </div>
+      <div class="login-field">
+        <span class="login-prompt">password:~$</span>
+        <input type="password" id="password-input" name="password" placeholder="_" autocomplete="current-password">
+      </div>
+
+      <div id="auth-error" class="auth-error"></div>
+
+      <button type="submit" id="connect-btn">[ LOGIN ]</button>
+      <div class="login-hint">Press Enter or click to connect</div>
+    </form>
+
+    <button
+      type="button"
+      id="server-config-open-btn"
+      class="server-config-open-btn"
+      aria-label="Modifier l'URL du serveur backend"
+      title="Modifier l'URL du serveur backend"
+    >
+      [ backend url ]
+    </button>
+  </div>
+</div>
+
+<!-- ── Server config (desktop) ───────────────────────────────────── -->
+<div id="server-config-screen" style="display:none">
+  <div class="login-box server-config-box" role="dialog" aria-modal="true" aria-labelledby="server-config-title">
+    <div class="login-subtitle" id="server-config-title">[ backend server ]</div>
+
+    <div class="login-field">
+      <span class="login-prompt">url:~$</span>
+      <input
+        type="text"
+        id="server-url-input"
+        name="server-url"
+        placeholder="https://fcchat.srko.fr"
+        autocomplete="off"
+        spellcheck="false"
+        inputmode="url"
+      >
+    </div>
+
+    <div id="server-config-error" class="auth-error" style="display:none"></div>
+
+    <button type="button" id="server-save-btn">[ SAVE ]</button>
+    <div class="login-hint">Entre l'URL du serveur Rust (ex: https://fcchat.srko.fr)</div>
+  </div>
+</div>
+
+<!-- ── CHAT ───────────────────────────────────────────────────────── -->
+<div id="chat-screen">
+
+  <!-- Sidebar: users -->
+  <div id="sidebar">
+    <div class="sidebar-header">
+      <span>[ ONLINE ]</span>
+      <span id="user-count" class="user-count">0</span>
+    </div>
+
+    <!-- Scrollable area: online + offline users -->
+    <div class="users-container">
+      <ul id="users-list"></ul>
+      <div id="offline-section" style="display:none">
+        <div class="sidebar-section-header">[ OFFLINE ]</div>
+        <ul id="offline-list"></ul>
+      </div>
+    </div>
+
+    <!-- Theme picker dots -->
+    <div class="theme-groups">
+      <div class="theme-group">
+        <div class="theme-group-title">[ COLOR VARIANTS ]</div>
+        <div class="theme-row">
+          <button type="button" class="theme-dot" data-theme="" style="background:#00ff41" title="Matrix (défaut)" aria-label="Theme Matrix (défaut)"></button>
+          <button type="button" class="theme-dot" data-theme="nord" style="background:#88c0d0" title="Nord" aria-label="Theme Nord"></button>
+          <button type="button" class="theme-dot" data-theme="dracula" style="background:#bd93f9" title="Dracula" aria-label="Theme Dracula"></button>
+          <button type="button" class="theme-dot" data-theme="monokai" style="background:#f1fa8c" title="Monokai" aria-label="Theme Monokai"></button>
+          <button type="button" class="theme-dot" data-theme="solarized" style="background:#268bd2" title="Solarized" aria-label="Theme Solarized"></button>
+          <button type="button" class="theme-dot" data-theme="synthwave" style="background:#ff2a6d" title="Synthwave" aria-label="Theme Synthwave"></button>
+        </div>
+      </div>
+
+      <div class="theme-group">
+        <div class="theme-group-title">[ UI STYLES ]</div>
+        <div class="theme-row">
+          <button type="button" class="theme-dot" data-theme="modern" style="background:#8dddff" title="Modern Liquid Glass" aria-label="Theme Modern Liquid Glass"></button>
+          <button type="button" class="theme-dot" data-theme="popart" style="background:#ff355e" title="Pop Art" aria-label="Theme Pop Art"></button>
+          <button type="button" class="theme-dot" data-theme="neobrutal" style="background:#ffd60a" title="Neo Brutalism" aria-label="Theme Neo Brutalism"></button>
+          <button type="button" class="theme-dot" data-theme="aurora" style="background:#7c5cff" title="Aurora Glass" aria-label="Theme Aurora Glass"></button>
+          <button type="button" class="theme-dot" data-theme="cyberhud" style="background:#00f6ff" title="Cyber HUD" aria-label="Theme Cyber HUD"></button>
+          <button type="button" class="theme-dot" data-theme="clay" style="background:#f0c8b5" title="Claymorphism 2.0" aria-label="Theme Claymorphism 2.0"></button>
+          <button type="button" class="theme-dot" data-theme="editorial" style="background:#b08b5a" title="Editorial Luxury" aria-label="Theme Editorial Luxury"></button>
+          <button type="button" class="theme-dot" data-theme="y2k" style="background:#ff5fd2" title="Retro 2000 / Y2K" aria-label="Theme Retro 2000 / Y2K"></button>
+          <button type="button" class="theme-dot" data-theme="comicx" style="background:#ff1f5a" title="Comic Pop Extreme" aria-label="Theme Comic Pop Extreme"></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-footer">
+      ChatFC v2.0
+      <button id="logout-btn" title="Logout">[ logout ]</button>
+    </div>
+  </div>
+
+  <!-- Main area -->
+  <div id="main-chat">
+
+    <!-- DM panel (overlays the chat area when a DM is open) -->
+    <div id="dm-panel" style="display:none">
+      <div id="dm-header">
+        <button id="dm-close" title="Retour au canal">←</button>
+        <span id="dm-title">DM</span>
+        <span id="dm-status"></span>
+      </div>
+      <div id="dm-messages"></div>
+      <div id="dm-input-area">
+        <button id="dm-emoji-btn" class="input-icon-btn" title="Emoji" aria-label="Emoji">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"></circle>
+            <circle cx="9" cy="10" r="1"></circle>
+            <circle cx="15" cy="10" r="1"></circle>
+            <path d="M8 14c1 1.4 2.4 2 4 2s3-.6 4-2"></path>
+          </svg>
+        </button>
+        <button id="dm-gif-btn" class="input-icon-btn" title="GIF search" aria-label="GIF search">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3.5" y="5.5" width="17" height="13" rx="1.5"></rect>
+            <path d="M8 13.2V10.8h2.1"></path>
+            <path d="M12 13.2V10.8"></path>
+            <path d="M14 13.2V10.8h2.2"></path>
+          </svg>
+        </button>
+        <label for="dm-file-upload" class="attach-btn" title="Joindre un fichier">📎</label>
+        <input type="file" id="dm-file-upload" multiple style="display:none">
+        <input type="text" id="dm-input" placeholder="Message…" autocomplete="off" spellcheck="false">
+        <button id="dm-send">SEND ▶</button>
+      </div>
+    </div>
+
+    <!-- Channel tabs bar (browser-style tabs) -->
+    <div id="channel-tabs">
+      <button id="new-channel-btn" class="ch-tab-add" title="Nouveau canal">+</button>
+    </div>
+
+    <div id="chat-header">
+      <span class="header-channel">#general</span>
+      <span class="header-info" id="header-info">no topic set — Ctrl+K pour rechercher</span>
+      <div id="notification-badge" class="notif-badge" style="display:none">
+        🔔 <span id="mention-count">0</span> mention(s)
+      </div>
+    </div>
+
+    <!-- Messages -->
+    <div id="messages">
+      <div class="drop-overlay">⬆ Drop files to upload</div>
+    </div>
+
+    <!-- Typing indicator -->
+    <div id="typing-indicator"></div>
+
+    <!-- File staging (shown after picking a file, before sending) -->
+    <div id="file-staging" style="display:none">
+      <div id="staging-preview"></div>
+      <div id="staging-controls">
+        <span id="staging-hint">Les fichiers seront envoyés avec SEND. Le champ message devient la légende.</span>
+        <button id="staging-cancel" title="Annuler">✕</button>
+      </div>
+    </div>
+
+    <!-- Reply bar (visible when replying) -->
+    <div id="reply-bar" style="display:none">
+      <span class="reply-bar-icon">↩</span>
+      <span id="reply-bar-text"></span>
+      <button id="reply-cancel" type="button" title="Cancel reply">✕</button>
+    </div>
+
+    <!-- Input -->
+    <div id="input-area">
+      <button id="emoji-msg-btn" class="input-icon-btn" title="Emoji" aria-label="Emoji">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"></circle>
+          <circle cx="9" cy="10" r="1"></circle>
+          <circle cx="15" cy="10" r="1"></circle>
+          <path d="M8 14c1 1.4 2.4 2 4 2s3-.6 4-2"></path>
+        </svg>
+      </button>
+      <button id="gif-btn" class="input-icon-btn" title="GIF search" aria-label="GIF search">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3.5" y="5.5" width="17" height="13" rx="1.5"></rect>
+          <path d="M8 13.2V10.8h2.1"></path>
+          <path d="M12 13.2V10.8"></path>
+          <path d="M14 13.2V10.8h2.2"></path>
+        </svg>
+      </button>
+      <label for="file-upload" class="attach-btn" title="Attach file (or drag & drop)">📎</label>
+      <input type="file" id="file-upload" multiple style="display:none">
+      <textarea
+        id="message-input"
+        rows="1"
+        placeholder="Type a message… (@user to mention)"
+        autocomplete="off"
+        spellcheck="false"
+      ></textarea>
+      <button id="send-btn">SEND ▶</button>
+    </div>
+  </div><!-- /main-chat -->
+</div><!-- /chat-screen -->
+
+<!-- Reaction emoji picker (for message reactions) -->
+<div id="emoji-picker" style="display:none">
+  <div id="emoji-grid"></div>
+</div>
+
+<!-- Message emoji picker (insert into text) -->
+<div id="msg-emoji-picker" style="display:none">
+  <input type="text" id="emoji-search" placeholder="Search emoji…" autocomplete="off">
+  <div id="emoji-cats"></div>
+  <div id="emoji-list"></div>
+</div>
+
+<!-- GIF picker -->
+<div id="gif-picker" style="display:none">
+  <input type="text" id="gif-search" placeholder="Search GIFs…" autocomplete="off">
+  <div id="gif-results"></div>
+  <div class="tenor-credit">Powered by <span>Tenor</span></div>
+</div>
+
+<!-- @ autocomplete -->
+<div id="autocomplete" style="display:none"></div>
+
+<!-- Image lightbox -->
+<div id="lightbox" style="display:none">
+  <img id="lightbox-img" alt="">
+  <div class="lightbox-hint">click anywhere to close</div>
+</div>
+
+<!-- Global user search (Ctrl+K) -->
+<div id="search-modal" style="display:none">
+  <div id="search-box">
+    <div class="search-hint">Ctrl+K — Rechercher un utilisateur · Entrée pour ouvrir DM · Échap pour fermer</div>
+    <input type="text" id="search-input" placeholder="Nom d'utilisateur…" autocomplete="off" spellcheck="false">
+    <div id="search-results"></div>
+  </div>
+</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
+

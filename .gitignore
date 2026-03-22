@@ -1,5 +1,15 @@
 ## Rust / build artifacts
-backend/target/
+**/target/
+**/*.rs.bk
+**/*.pdb
+
+## Front / tooling (si ajoutés plus tard)
+dist/
+build/
+.next/
+out/
+.cache/
+*.tsbuildinfo
 
 ## Node (just au cas où)
 node_modules/
@@ -16,6 +26,9 @@ uploads/
 ## OS files
 .DS_Store
 Thumbs.db
+
+## IDE / éditeur
+.idea/
 
 ## Local archives
 chatfcdev.zip

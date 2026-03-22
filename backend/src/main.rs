@@ -33,6 +33,7 @@ use sqlx::{
 };
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::cors::{Any as CorsAny, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
 use uuid::Uuid;
@@ -67,8 +68,8 @@ const CSP: &str = concat!(
     "default-src 'self';",
     " script-src 'self';",
     " style-src 'self' 'unsafe-inline';",
-    " img-src 'self' data: blob: https:;",
-    " connect-src 'self' https: ws: wss:;",
+    " img-src 'self' data: blob: http: https:;",
+    " connect-src 'self' http: https: ws: wss:;",
     " object-src 'none';",
     " base-uri 'self';",
     " frame-ancestors 'none';",
@@ -975,6 +976,12 @@ async fn main() {
         .nest_service("/uploads", ServeDir::new("uploads"))
         .nest_service("/", ServeDir::new("frontend"))
         .layer(RequestBodyLimitLayer::new(25 * 1024 * 1024))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(CorsAny)
+                .allow_methods(CorsAny)
+                .allow_headers(CorsAny)
+        )
         .layer(SetResponseHeaderLayer::overriding(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
