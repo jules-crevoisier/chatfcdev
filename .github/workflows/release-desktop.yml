@@ -1,0 +1,51 @@
+# Publie ChatFC Desktop sur une GitHub Release + latest.json pour l'auto-update Tauri.
+#
+# À faire une fois sur GitHub (Settings → Secrets and variables → Actions) :
+#   - TAURI_PRIVATE_KEY        : contenu du fichier .key (signing / updater)
+#   - TAURI_PRIVATE_KEY_PASSWORD : (optionnel) mot de passe de la clé si chiffrée
+#   - CHATFC_UPDATER_PUBKEY    : clé publique minisign (une ligne, commence souvent par "untrusted comment:")
+#
+# Publier une version :
+#   1. Monte la version dans chatfc-desktop/tauri.conf.json ET chatfc-desktop/Cargo.toml
+#   2. Commit + push
+#   3. git tag desktop-v0.2.0 && git push origin desktop-v0.2.0
+#
+# L'URL utilisée par l'app (compilée dans le binaire) pointe vers le dernier latest.json :
+#   https://github.com/<owner>/<repo>/releases/latest/download/latest.json
+
+name: Release desktop (Windows)
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+
+jobs:
+  publish:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build & upload release (Tauri)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_PRIVATE_KEY_PASSWORD }}
+          CHATFC_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
+          CHATFC_UPDATER_PUBKEY: ${{ secrets.CHATFC_UPDATER_PUBKEY }}
+        with:
+          projectPath: chatfc-desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: "ChatFC ${{ github.ref_name }}"
+          releaseBody: "Installeur Windows ci-dessous. Les builds avec mise à jour activée récupèrent la nouvelle version au lancement."
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true

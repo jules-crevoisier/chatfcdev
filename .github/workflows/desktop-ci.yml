@@ -1,0 +1,28 @@
+# Vérifie que le projet Tauri compile (sans release).
+
+name: Desktop CI
+
+on:
+  pull_request:
+    paths:
+      - "chatfc-desktop/**"
+      - "frontend/tauri-dist/**"
+      - ".github/workflows/desktop-ci.yml"
+  push:
+    branches: [main, master]
+    paths:
+      - "chatfc-desktop/**"
+      - "frontend/tauri-dist/**"
+      - ".github/workflows/desktop-ci.yml"
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo check (sans updater — pas de secrets requis)
+        working-directory: chatfc-desktop
+        run: cargo check
