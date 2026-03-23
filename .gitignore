@@ -22,6 +22,7 @@ uploads/
 ## Secrets / local env
 .env
 .env.*
+.secrets/
 
 ## OS files
 .DS_Store

@@ -5,6 +5,11 @@
   "build": {
     "frontendDist": "../frontend/tauri-dist"
   },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true
+  },
   "app": {
     "windows": [
       {
