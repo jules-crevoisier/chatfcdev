@@ -10,6 +10,17 @@
     "targets": "all",
     "createUpdaterArtifacts": true
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "untrusted comment: minisign public key: 9CEE8080E34DE139\nRWQ54U3jgIDunL85znH4pHBcAiK1ryY4pMlknN2vk5wcxEW8bFv69fPe",
+      "endpoints": [
+        "https://github.com/jules-crevoisier/chatfcdev/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "app": {
     "windows": [
       {
