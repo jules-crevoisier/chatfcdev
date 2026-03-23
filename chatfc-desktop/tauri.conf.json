@@ -1,6 +1,6 @@
 {
   "productName": "ChatFC",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "identifier": "com.chatfc.desktop",
   "build": {
     "frontendDist": "../frontend/tauri-dist"
@@ -15,7 +15,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "untrusted comment: minisign public key: 9CEE8080E34DE139\nRWQ54U3jgIDunL85znH4pHBcAiK1ryY4pMlknN2vk5wcxEW8bFv69fPe",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlDRUU4MDgwRTM0REUxMzkKUldRNTRVM2pnSUR1bkw4NXpuSDRwSEJjQWlLMXJ5WTRwTWxrbk4ydms1d2N4RVc4YkZ2NjlmUGUK",
       "endpoints": [
         "https://github.com/jules-crevoisier/chatfcdev/releases/latest/download/latest.json"
       ],

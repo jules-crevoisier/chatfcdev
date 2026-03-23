@@ -3,7 +3,7 @@
 # À faire une fois sur GitHub (Settings → Secrets and variables → Actions) :
 #   - TAURI_PRIVATE_KEY        : contenu du fichier .key (signing / updater)
 #   - TAURI_PRIVATE_KEY_PASSWORD : (optionnel) mot de passe de la clé si chiffrée
-#   - CHATFC_UPDATER_PUBKEY    : même texte que plugins.updater.pubkey dans tauri.conf.json (2 lignes minisign)
+#   - CHATFC_UPDATER_PUBKEY    : exactement la même chaîne que plugins.updater.pubkey (base64 du .pub minisign, une ligne)
 #
 # Publier une version :
 #   1. Monte la version dans chatfc-desktop/tauri.conf.json ET chatfc-desktop/Cargo.toml
