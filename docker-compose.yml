@@ -1,4 +1,23 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: chatfc-redis
+    restart: unless-stopped
+
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: chatfc-livekit
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    depends_on:
+      - redis
+    ports:
+      - "7880:7880"   # websocket signaling
+      - "7881:7881"   # tcp fallback
+      - "50000-50100:50000-50100/udp" # RTP/RTCP
+    volumes:
+      - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
+
   chatfc:
     build: .
     container_name: chatfc
@@ -13,3 +32,7 @@ services:
       - ./frontend:/app/frontend:ro
     environment:
       PORT: "3000"
+      LIVEKIT_URL: "ws://livekit:7880"
+      LIVEKIT_PUBLIC_URL: "ws://localhost:7880"
+      LIVEKIT_API_KEY: "chatfc-dev-key"
+      LIVEKIT_API_SECRET: "chatfc-dev-secret"

@@ -11,6 +11,7 @@ import { resolveHost, getServerBackendProtocol, isBackendUrlConfigured } from '.
 import { connectWS } from './ws.js';
 import { cancelStaging } from './upload.js';
 import { closeSearch } from './search.js';
+import { resetVoice } from './voice.js';
 
 // ── Auth mode ────────────────────────────────────────────────────
 const setAuthMode = (mode) => {
@@ -82,6 +83,7 @@ const logout = () => {
   localStorage.removeItem(VIEW_KEY);
   state.myUsername    = '';
   state.customEmojis = new Map();
+  resetVoice();
 
   state.mentionCount = 0;
   document.getElementById('notification-badge').style.display = 'none';
@@ -93,6 +95,7 @@ const logout = () => {
 
   state.channelMessages = new Map();
   state.channelUnread   = new Map();
+  state.channelKinds    = new Map([['general', 'text']]);
   state.channels        = ['general'];
   state.activeChannel   = 'general';
   state.typingState     = new Map();

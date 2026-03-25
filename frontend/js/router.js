@@ -6,6 +6,7 @@ import { handleChannelList, handleTyping, applyTopic } from './channels.js';
 import { handleEmojiList, applyReactions } from './emoji.js';
 import { renderUsers, handleDmHistory, handleDmThread, handleDmMessage } from './dm.js';
 import { scrollToBottom } from './helpers.js';
+import { handleVoiceState, handleVoiceSpeaking, handleVoiceSignalMessage, handleVoiceToken } from './voice.js';
 
 export const handleServer = (msg) => {
   switch (msg.type) {
@@ -35,5 +36,9 @@ export const handleServer = (msg) => {
     case 'channel_list':    handleChannelList(msg.channels); break;
     case 'typing':          handleTyping(msg); break;
     case 'emoji_list':      handleEmojiList(msg.emojis); renderChannel(state.activeChannel); break;
+    case 'voice_state':     handleVoiceState(msg); break;
+    case 'voice_token':     handleVoiceToken(msg); break;
+    case 'voice_speaking':  handleVoiceSpeaking(msg); break;
+    case 'voice_signal':    handleVoiceSignalMessage(msg); break;
   }
 };

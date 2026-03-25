@@ -2,9 +2,14 @@
 
 import { VIEW_KEY } from './constants.js';
 import state from './state.js';
-import { channelTabsEl, messageInput, typingIndicator, headerInfo } from './dom.js';
+import {
+  channelTabsEl, messageInput, typingIndicator, headerInfo,
+  createChannelModal, createChannelInput, createChannelType,
+  createChannelCancel, createChannelConfirm, createChannelError,
+} from './dom.js';
 import { send, escHtml, scrollToBottom } from './helpers.js';
 import { renderChannel, cancelReply } from './messages.js';
+import { resetVoice } from './voice.js';
 
 // ── View persistence ─────────────────────────────────────────────
 export const saveView = () => {
@@ -38,6 +43,9 @@ export const restoreView = () => {
 export const handleChannelList = (newChannels) => {
   const list = Array.isArray(newChannels) ? newChannels : [];
   state.channels = list.map(ch => (typeof ch === 'string' ? ch : ch.name));
+  state.channelKinds = new Map(list.map(ch =>
+    typeof ch === 'string' ? [ch, 'text'] : [ch.name, (ch.kind || 'text')]
+  ));
   state.channelOwners = new Map(list.map(ch =>
     typeof ch === 'string' ? [ch, null] : [ch.name, ch.owner || null]
   ));
@@ -60,7 +68,8 @@ export const renderChannelTabs = () => {
 
     const nameSpan = document.createElement('span');
     nameSpan.className = 'ch-tab-name';
-    nameSpan.textContent = `#${ch}`;
+    const kind = state.channelKinds.get(ch) || 'text';
+    nameSpan.textContent = kind === 'voice' ? `V ${ch}` : `#${ch}`;
     tab.appendChild(nameSpan);
 
     const unread = state.channelUnread.get(ch) || 0;
@@ -94,12 +103,15 @@ export const renderChannelTabs = () => {
   newBtn.className = 'ch-tab-add';
   newBtn.textContent = '+';
   newBtn.title = 'Nouveau canal';
-  newBtn.addEventListener('click', createChannelPrompt);
+  newBtn.addEventListener('click', openCreateChannelModal);
   channelTabsEl.appendChild(newBtn);
 };
 
 export const switchChannel = (name) => {
   if (name === state.activeChannel) return;
+  const prevChannel = state.activeChannel;
+  const prevKind = state.channelKinds.get(prevChannel) || 'text';
+  const nextKind = state.channelKinds.get(name) || 'text';
   cancelReply(); // Hide reply bar when switching channel
   state.activeChannel = name;
   state.channelUnread.set(name, 0);
@@ -111,14 +123,46 @@ export const switchChannel = (name) => {
   updateTypingIndicator();
   messageInput.focus();
   saveView();
+
+  // Voice channels auto-join so users don't need to keep the voice UI visible.
+  if (nextKind === 'voice') {
+    resetVoice();
+    send({ type: 'voice_join', channel: name });
+  } else if (prevKind === 'voice') {
+    resetVoice();
+  }
 };
 
-const createChannelPrompt = () => {
-  const raw = prompt('Nom du canal (lettres, chiffres, tirets) :');
-  if (!raw) return;
+const setCreateError = (msg) => {
+  if (!createChannelError) return;
+  createChannelError.textContent = msg || '';
+  createChannelError.style.display = msg ? 'block' : 'none';
+};
+
+const closeCreateChannelModal = () => {
+  if (!createChannelModal) return;
+  createChannelModal.style.display = 'none';
+  setCreateError('');
+};
+
+const confirmCreateChannel = () => {
+  const raw = (createChannelInput?.value || '').trim();
   const name = raw.toLowerCase().replace(/[^a-z0-9\-_]/g, '').slice(0, 32);
-  if (!name) { alert('Nom invalide. Utilisez uniquement lettres, chiffres, tirets.'); return; }
-  send({ type: 'create_channel', name });
+  if (!name) { setCreateError('Nom invalide. Utilisez lettres, chiffres, tirets.'); return; }
+  const kind = (createChannelType?.value === 'voice') ? 'voice' : 'text';
+  send({ type: 'create_channel', name, kind });
+  closeCreateChannelModal();
+};
+
+const openCreateChannelModal = () => {
+  if (!createChannelModal) return;
+  createChannelModal.style.display = 'flex';
+  if (createChannelInput) {
+    createChannelInput.value = '';
+    createChannelInput.focus();
+  }
+  if (createChannelType) createChannelType.value = 'text';
+  setCreateError('');
 };
 
 // ── Typing indicator ─────────────────────────────────────────────
@@ -202,3 +246,12 @@ export const initTopic = () => {
     inp.addEventListener('blur', save, { once: true });
   });
 };
+
+if (createChannelCancel) createChannelCancel.addEventListener('click', closeCreateChannelModal);
+if (createChannelConfirm) createChannelConfirm.addEventListener('click', confirmCreateChannel);
+if (createChannelInput) {
+  createChannelInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); confirmCreateChannel(); }
+    if (e.key === 'Escape') { e.preventDefault(); closeCreateChannelModal(); }
+  });
+}

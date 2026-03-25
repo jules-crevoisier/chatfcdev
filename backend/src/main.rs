@@ -25,6 +25,7 @@ use argon2::{
     Argon2,
 };
 use serde::{Deserialize, Serialize};
+use jsonwebtoken::{EncodingKey, Header};
 use sha2::{Digest, Sha256};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
@@ -66,7 +67,7 @@ const MAX_WS_MSG_SIZE: usize = 50 * 1024; // 50 KiB
 /// - Allow `ws:`/`wss:` for WebSocket chat
 const CSP: &str = concat!(
     "default-src 'self';",
-    " script-src 'self';",
+    " script-src 'self' https://cdn.jsdelivr.net;",
     " style-src 'self' 'unsafe-inline';",
     " img-src 'self' data: blob: http: https:;",
     " connect-src 'self' http: https: ws: wss:;",
@@ -85,6 +86,9 @@ const WS_RATE_WINDOW_SECS: u64 = 60;
 /// Upload quota & orphan cleanup.
 const MAX_UPLOADS_TOTAL_BYTES: u64 = 500 * 1024 * 1024; // 500 MiB
 const ORPHAN_MAX_AGE_SECS: u64 = 30 * 24 * 60 * 60; // 30 days
+const LIVEKIT_TOKEN_TTL_SECS: i64 = 60 * 60;
+/// Grace period to avoid removing voice presence on fast reloads.
+const VOICE_LEAVE_GRACE_SECS: u64 = 5;
 
 // ── SQLite – init & schema ─────────────────────────────────────────────────────
 
@@ -142,10 +146,14 @@ async fn init_db() -> SqlitePool {
         "CREATE TABLE IF NOT EXISTS channels (
             name       TEXT PRIMARY KEY,
             owner      TEXT,
+            kind       TEXT NOT NULL DEFAULT 'text',
             topic      TEXT NOT NULL DEFAULT '',
             created_at INTEGER NOT NULL DEFAULT (unixepoch())
         )"
     ).execute(&pool).await.expect("create channels table");
+    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
+        .execute(&pool)
+        .await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS messages (
@@ -372,8 +380,10 @@ async fn migrate_emojis_json(pool: &SqlitePool) {
 
 // ── SQLite – channels ──────────────────────────────────────────────────────────
 
-async fn db_load_channels(pool: &SqlitePool) -> Vec<(String, Option<String>, String)> {
-    sqlx::query("SELECT name, owner, topic FROM channels ORDER BY created_at ASC")
+fn default_channel_kind() -> String { "text".to_string() }
+
+async fn db_load_channels(pool: &SqlitePool) -> Vec<(String, Option<String>, String, String)> {
+    sqlx::query("SELECT name, owner, topic, kind FROM channels ORDER BY created_at ASC")
         .fetch_all(pool)
         .await
         .unwrap_or_default()
@@ -382,13 +392,14 @@ async fn db_load_channels(pool: &SqlitePool) -> Vec<(String, Option<String>, Str
             row.try_get::<String, _>("name").ok()?,
             row.try_get::<Option<String>, _>("owner").ok().flatten(),
             row.try_get::<String, _>("topic").unwrap_or_default(),
+            row.try_get::<String, _>("kind").unwrap_or_else(|_| "text".to_string()),
         )))
         .collect()
 }
 
-async fn db_save_channel(pool: &SqlitePool, name: &str, owner: Option<&str>) {
-    let _ = sqlx::query("INSERT OR IGNORE INTO channels (name, owner) VALUES (?1, ?2)")
-        .bind(name).bind(owner).execute(pool).await;
+async fn db_save_channel(pool: &SqlitePool, name: &str, owner: Option<&str>, kind: &str) {
+    let _ = sqlx::query("INSERT OR IGNORE INTO channels (name, owner, kind) VALUES (?1, ?2, ?3)")
+        .bind(name).bind(owner).bind(kind).execute(pool).await;
 }
 
 async fn db_delete_channel(pool: &SqlitePool, name: &str) {
@@ -711,8 +722,25 @@ enum ClientMsg {
     /// Heartbeat from client — ignored, but must parse so we don't drop the message silently.
     #[serde(rename = "ping")]
     Ping,
-    CreateChannel { name: String },
+    CreateChannel {
+        name: String,
+        #[serde(default = "default_channel_kind")]
+        kind: String,
+    },
     DeleteChannel { name: String },
+    VoiceJoin { channel: String },
+    VoiceLeave { channel: String },
+    VoiceSpeaking {
+        #[serde(default = "default_channel")]
+        channel: String,
+        speaking: bool,
+    },
+    VoiceSignal {
+        to: String,
+        #[serde(default = "default_channel")]
+        channel: String,
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -729,13 +757,17 @@ enum ServerMsg {
     TopicChanged   { content: String, channel: String },
     Typing         { username: String, channel: String },
     ChannelList    { channels: Vec<ChannelInfo> },
-    ChannelCreated { name: String },
+    ChannelCreated { name: String, kind: String },
     ChannelDeleted { name: String },
     EmojiList      { emojis: Vec<CustomEmoji> },
     DmHistory      { dms: Vec<DmHistoryEntry> },
     /// Full thread with one partner — replaces client cache for that partner (like History per channel).
     #[serde(rename = "dm_thread")]
     DmThread       { partner: String, dms: Vec<DmHistoryEntry> },
+    VoiceState     { channel: String, users: Vec<String> },
+    VoiceToken     { channel: String, url: String, token: String },
+    VoiceSpeaking  { channel: String, username: String, speaking: bool },
+    VoiceSignal    { channel: String, from: String, payload: serde_json::Value },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -772,6 +804,8 @@ fn dm_record_to_history_entry(dm: DmRecord) -> DmHistoryEntry {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct ChannelInfo {
     name: String,
+    #[serde(default = "default_channel_kind")]
+    kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     owner: Option<String>,
 }
@@ -791,7 +825,12 @@ struct AppState {
     /// username → active session IDs (multi-tab / multi-device).
     user_sessions: DashMap<String, Vec<String>>,
     topics: DashMap<String, String>,
+    channel_kinds: DashMap<String, String>,
     channel_owners: DashMap<String, String>,
+    /// voice channel -> users currently connected to voice for that channel
+    voice_members: DashMap<String, Arc<Mutex<HashSet<String>>>>,
+    /// username -> current voice channel
+    user_voice_channel: DashMap<String, String>,
     /// In-memory emoji list (source of truth is SQLite).
     emojis: Mutex<Vec<CustomEmoji>>,
     /// Per-user spam tracking.
@@ -816,21 +855,24 @@ impl AppState {
         let emojis = db_load_emojis(&db).await;
 
         // Bootstrap #general.
-        db_save_channel(&db, "general", None).await;
+        db_save_channel(&db, "general", None, "text").await;
         let db_channels = db_load_channels(&db).await;
 
         let topics: DashMap<String, String>        = DashMap::new();
+        let channel_kinds: DashMap<String, String> = DashMap::new();
         let channel_owners: DashMap<String, String> = DashMap::new();
         let channels: DashMap<String, Arc<Mutex<Vec<ChatMessage>>>> = DashMap::new();
         let mut channel_names = vec!["general".to_string()];
 
-        for (name, owner, topic) in &db_channels {
+        for (name, owner, topic, kind) in &db_channels {
             if name != "general" && !channel_names.contains(name) {
                 channel_names.push(name.clone());
             }
             if !topic.is_empty() { topics.insert(name.clone(), topic.clone()); }
+            channel_kinds.insert(name.clone(), kind.clone());
             if let Some(o) = owner { channel_owners.insert(name.clone(), o.clone()); }
         }
+        channel_kinds.entry("general".to_string()).or_insert("text".to_string());
 
         for name in &channel_names {
             let msgs = db_load_messages(&db, name, HISTORY_CACHE as i64).await;
@@ -846,7 +888,10 @@ impl AppState {
             dm_senders: DashMap::new(),
             user_sessions: DashMap::new(),
             topics,
+            channel_kinds,
             channel_owners,
+            voice_members: DashMap::new(),
+            user_voice_channel: DashMap::new(),
             emojis: Mutex::new(emojis),
             spam_tracker: DashMap::new(),
             rate_auth: DashMap::new(),
@@ -862,6 +907,7 @@ impl AppState {
     fn channel_infos(&self, names: &[String]) -> Vec<ChannelInfo> {
         names.iter().map(|name| ChannelInfo {
             name: name.clone(),
+            kind: self.channel_kinds.get(name).map(|e| e.clone()).unwrap_or_else(|| "text".to_string()),
             owner: self.channel_owners.get(name).map(|e| e.clone()),
         }).collect()
     }
@@ -924,6 +970,96 @@ fn send_to_user(state: &Arc<AppState>, username: &str, msg: &str) {
                 let _ = tx.send(msg.to_string());
             }
         }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LivekitVideoGrant {
+    room_join: bool,
+    room: String,
+    can_publish: bool,
+    can_subscribe: bool,
+}
+
+#[derive(Serialize)]
+struct LivekitClaims {
+    iss: String,
+    sub: String,
+    iat: usize,
+    exp: usize,
+    video: LivekitVideoGrant,
+}
+
+fn normalize_voice_room(raw_channel: &str, _self_user: &str, _peer_opt: Option<&str>) -> Option<String> {
+    if raw_channel.starts_with("dm-") {
+        // Frontend already sends deterministic DM room name: dm-<userA>-<userB>.
+        return Some(raw_channel.to_lowercase());
+    }
+    let channel = sanitize_channel(raw_channel);
+    if channel.is_empty() { return None; }
+    Some(format!("ch-{}", channel))
+}
+
+fn build_livekit_token(identity: &str, room: &str) -> Result<(String, String), String> {
+    let internal_url = std::env::var("LIVEKIT_URL").unwrap_or_else(|_| "ws://localhost:7880".to_string());
+    let url = std::env::var("LIVEKIT_PUBLIC_URL").unwrap_or(internal_url);
+    let api_key = std::env::var("LIVEKIT_API_KEY")
+        .map_err(|_| "LIVEKIT_API_KEY missing".to_string())?;
+    let api_secret = std::env::var("LIVEKIT_API_SECRET")
+        .map_err(|_| "LIVEKIT_API_SECRET missing".to_string())?;
+
+    let now = chrono::Utc::now().timestamp();
+    let claims = LivekitClaims {
+        iss: api_key.clone(),
+        sub: identity.to_string(),
+        iat: now.max(0) as usize,
+        exp: (now + LIVEKIT_TOKEN_TTL_SECS).max(0) as usize,
+        video: LivekitVideoGrant {
+            room_join: true,
+            room: room.to_string(),
+            can_publish: true,
+            can_subscribe: true,
+        },
+    };
+
+    let token = jsonwebtoken::encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(api_secret.as_bytes()),
+    )
+    .map_err(|e| format!("livekit token sign failed: {e}"))?;
+
+    Ok((url, token))
+}
+
+async fn remove_user_from_voice_channel(state: &Arc<AppState>, username: &str) {
+    let Some((_, channel)) = state.user_voice_channel.remove(username) else { return; };
+    if let Some(entry) = state.voice_members.get(&channel) {
+        let arc = entry.value().clone();
+        drop(entry);
+        let mut set = arc.lock().await;
+        set.remove(username);
+    }
+    broadcast_voice_state(state, &channel).await;
+}
+
+async fn broadcast_voice_state(state: &Arc<AppState>, channel: &str) {
+    let users = if let Some(entry) = state.voice_members.get(channel) {
+        let arc = entry.value().clone();
+        drop(entry);
+        let mut users: Vec<String> = arc.lock().await.iter().cloned().collect();
+        users.sort();
+        users
+    } else {
+        vec![]
+    };
+
+    if let Ok(json) = serde_json::to_string(&ServerMsg::VoiceState {
+        channel: channel.to_string(),
+        users,
+    }) {
+        let _ = state.tx.send(json);
     }
 }
 
@@ -1338,6 +1474,40 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, username: String
         sessions.len()
     };
     if remaining == 0 {
+        // Delay removing voice presence so a fast page reload doesn't make
+        // other users lose the speaking/participant UI.
+        if let Some(voice_channel_snapshot) = state
+            .user_voice_channel
+            .get(&username)
+            .map(|v| v.clone())
+        {
+            let state_clone = state.clone();
+            let username_clone = username.clone();
+            let voice_channel_snapshot_clone = voice_channel_snapshot.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(VOICE_LEAVE_GRACE_SECS)).await;
+
+                let remaining_now = state_clone
+                    .user_sessions
+                    .get(&username_clone)
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                if remaining_now != 0 {
+                    return;
+                }
+
+                let voice_now = state_clone
+                    .user_voice_channel
+                    .get(&username_clone)
+                    .map(|v| v.clone());
+                if voice_now.as_deref() != Some(voice_channel_snapshot_clone.as_str()) {
+                    return;
+                }
+
+                remove_user_from_voice_channel(&state_clone, &username_clone).await;
+            });
+        }
+
         state.users.remove(&username);
         state.user_sessions.remove(&username);
         state.spam_tracker.remove(&username);
@@ -1721,20 +1891,125 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
         }
 
         // ── Create channel ─────────────────────────────────────────
-        ClientMsg::CreateChannel { name } => {
+        ClientMsg::CreateChannel { name, kind } => {
             let name = sanitize_channel(&name);
             if name.is_empty() || name == "general" { return; }
+            let kind = if kind.eq_ignore_ascii_case("voice") { "voice".to_string() } else { "text".to_string() };
             let mut list = state.channel_list.lock().await;
             if !list.contains(&name) && list.len() < 20 {
                 list.push(name.clone());
                 state.channels.insert(name.clone(), Arc::new(Mutex::new(Vec::new())));
                 state.channel_owners.insert(name.clone(), username.to_string());
+                state.channel_kinds.insert(name.clone(), kind.clone());
                 let names    = list.clone(); drop(list);
                 let channels = state.channel_infos(&names);
                 let db = state.db.clone(); let n = name.clone(); let owner = username.to_string();
-                tokio::spawn(async move { db_save_channel(&db, &n, Some(&owner)).await; });
-                if let Ok(json) = serde_json::to_string(&ServerMsg::ChannelCreated { name }) { let _ = state.tx.send(json); }
+                let db_kind = kind.clone();
+                tokio::spawn(async move { db_save_channel(&db, &n, Some(&owner), &db_kind).await; });
+                if let Ok(json) = serde_json::to_string(&ServerMsg::ChannelCreated { name, kind }) { let _ = state.tx.send(json); }
                 if let Ok(json) = serde_json::to_string(&ServerMsg::ChannelList { channels })  { let _ = state.tx.send(json); }
+            }
+        }
+
+        // ── Voice presence join/leave + signaling ───────────────────
+        ClientMsg::VoiceJoin { channel } => {
+            let peer_from_dm = if channel.starts_with("dm-") {
+                Some(channel.trim_start_matches("dm-"))
+            } else {
+                None
+            };
+            let Some(room) = normalize_voice_room(&channel, username, peer_from_dm) else { return; };
+            if !channel.starts_with("dm-") {
+                let text_channel = sanitize_channel(&channel);
+                let exists = {
+                    let list = state.channel_list.lock().await;
+                    list.contains(&text_channel)
+                };
+                if !exists { return; }
+            }
+
+            let Ok((livekit_url, token)) = build_livekit_token(username, &room) else {
+                let json = serde_json::to_string(&ServerMsg::System {
+                    content: "❌ LiveKit non configuré côté serveur.".to_string(),
+                }).unwrap_or_default();
+                send_to_user(state, username, &json);
+                return;
+            };
+
+            remove_user_from_voice_channel(state, username).await;
+            let arc = state.voice_members
+                .entry(room.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(HashSet::new())))
+                .clone();
+            arc.lock().await.insert(username.to_string());
+            state.user_voice_channel.insert(username.to_string(), room.clone());
+            broadcast_voice_state(state, &room).await;
+            if let Ok(json) = serde_json::to_string(&ServerMsg::VoiceToken {
+                channel: room,
+                url: livekit_url,
+                token,
+            }) {
+                send_to_user(state, username, &json);
+            }
+        }
+
+        ClientMsg::VoiceLeave { channel } => {
+            let channel = if channel.starts_with("ch-") || channel.starts_with("dm-") {
+                channel
+            } else {
+                let c = sanitize_channel(&channel);
+                if c.is_empty() { return; }
+                format!("ch-{}", c)
+            };
+            if let Some(entry) = state.voice_members.get(&channel) {
+                let arc = entry.value().clone();
+                drop(entry);
+                arc.lock().await.remove(username);
+            }
+            if state.user_voice_channel.get(username).map(|c| c.as_str() == channel).unwrap_or(false) {
+                state.user_voice_channel.remove(username);
+            }
+            broadcast_voice_state(state, &channel).await;
+        }
+
+        ClientMsg::VoiceSpeaking { channel, speaking } => {
+            let channel = if channel.starts_with("ch-") || channel.starts_with("dm-") {
+                channel
+            } else {
+                let c = sanitize_channel(&channel);
+                if c.is_empty() { return; }
+                format!("ch-{}", c)
+            };
+            if let Ok(json) = serde_json::to_string(&ServerMsg::VoiceSpeaking {
+                channel,
+                username: username.to_string(),
+                speaking,
+            }) {
+                let _ = state.tx.send(json);
+            }
+        }
+
+        ClientMsg::VoiceSignal { to, channel, payload } => {
+            let to_clean: String = to.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                .take(24).collect();
+            let auth = state.auth.lock().await;
+            let Some(to_canonical) = resolve_auth_username(&auth, &to_clean) else { return; };
+            drop(auth);
+            if to_canonical == username { return; }
+            let channel = if channel.starts_with("ch-") || channel.starts_with("dm-") {
+                channel
+            } else {
+                let c = sanitize_channel(&channel);
+                if c.is_empty() { return; }
+                format!("ch-{}", c)
+            };
+            if let Ok(json) = serde_json::to_string(&ServerMsg::VoiceSignal {
+                channel,
+                from: username.to_string(),
+                payload,
+            }) {
+                send_to_user(state, &to_canonical, &json);
             }
         }
 
@@ -1751,6 +2026,8 @@ async fn handle_client_message(text: &str, username: &str, session_id: &str, sta
                 state.channels.remove(&name);
                 state.topics.remove(&name);
                 state.channel_owners.remove(&name);
+                state.channel_kinds.remove(&name);
+                state.voice_members.remove(&name);
                 let names    = list.clone(); drop(list);
                 let channels = state.channel_infos(&names);
                 let db = state.db.clone(); let n = name.clone();

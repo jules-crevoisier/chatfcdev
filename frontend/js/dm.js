@@ -2,9 +2,10 @@
 
 import state from './state.js';
 import {
-  dmPanel, dmClose, dmTitle, dmStatus, dmMessages, dmInput, dmSend,
+  dmPanel, dmClose, dmTitle, dmStatus, dmVoiceSlot, dmMessages, dmInput, dmSend,
   usersList, userCount, offlineSection, offlineList, dmFileUpload,
   notifBadge, mentionCountEl, messageInput, replyBar, replyBarText,
+  voicePanel, voiceJoinBtn,
 } from './dom.js';
 import { send, colorFor, serverUrl, now, escHtml, resolveHost, getServerBackendProtocol } from './helpers.js';
 import { openLightbox } from './notifications.js';
@@ -13,6 +14,27 @@ import { saveView } from './channels.js';
 import { MAX_UPLOAD, TOKEN_KEY } from './constants.js';
 import { systemMsg, formatContent, cancelReply } from './messages.js';
 import { renderReactions, showEmojiPicker } from './emoji.js';
+
+let voicePanelOriginalParent = null;
+
+const moveVoicePanelToDm = () => {
+  if (!dmVoiceSlot || !voicePanel) return;
+  if (!voicePanelOriginalParent) voicePanelOriginalParent = voicePanel.parentNode;
+  if (voicePanel.parentNode !== dmVoiceSlot) {
+    dmVoiceSlot.innerHTML = '';
+    dmVoiceSlot.appendChild(voicePanel);
+  }
+  // DM audio se démarre via le bouton CALL, on évite un bouton "join canal vocal"
+  if (voiceJoinBtn) voiceJoinBtn.style.display = 'none';
+};
+
+const restoreVoicePanelToMain = () => {
+  if (!dmVoiceSlot || !voicePanel) return;
+  if (voicePanel.parentNode === dmVoiceSlot && voicePanelOriginalParent) {
+    voicePanelOriginalParent.appendChild(voicePanel);
+  }
+  if (voiceJoinBtn) voiceJoinBtn.style.display = '';
+};
 
 const dmSameUser = (a, b) =>
   a != null && b != null && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
@@ -88,6 +110,7 @@ export const openDm = (user) => {
   dmPanel.style.display = 'flex';
   dmInput.focus();
   renderUsers(state.allUsers.online, state.allUsers.offline);
+  moveVoicePanelToDm();
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     send({ type: 'load_dm', partner: user });
   }
@@ -97,6 +120,7 @@ export const openDm = (user) => {
 export const closeDm = () => {
   cancelReply(); // Hide reply bar when leaving MP mode
   state.activeDm = null;
+  restoreVoicePanelToMain();
   dmPanel.style.display = 'none';
   messageInput.focus();
   saveView();

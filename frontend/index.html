@@ -110,7 +110,9 @@
         <button id="dm-close" title="Retour au canal">←</button>
         <span id="dm-title">DM</span>
         <span id="dm-status"></span>
+        <button id="dm-call-btn" class="input-icon-btn" title="Appeler en vocal" aria-label="Appeler en vocal">CALL</button>
       </div>
+      <div id="dm-voice-slot" aria-label="Panneau audio du DM"></div>
       <div id="dm-messages"></div>
       <div id="dm-input-area">
         <button id="dm-emoji-btn" class="input-icon-btn" title="Emoji" aria-label="Emoji">
@@ -146,6 +148,39 @@
       <span class="header-info" id="header-info">no topic set — Ctrl+K pour rechercher</span>
       <div id="notification-badge" class="notif-badge" style="display:none">
         🔔 <span id="mention-count">0</span> mention(s)
+      </div>
+    </div>
+
+    <div id="voice-panel" style="display:none">
+      <div class="voice-header">
+        <strong>Vocal</strong>
+        <span id="voice-status">Hors canal vocal</span>
+      </div>
+      <div class="voice-grid">
+        <div class="voice-card">
+          <div class="voice-card-title">Participants</div>
+          <div id="voice-participants"></div>
+        </div>
+        <div class="voice-card">
+          <div class="voice-card-title">Commandes</div>
+          <div class="voice-row">
+            <button id="voice-join-btn">Rejoindre le vocal</button>
+            <button id="voice-leave-btn" disabled>Quitter</button>
+            <button id="voice-mic-btn" disabled>MIC ON</button>
+            <button id="voice-deafen-btn" disabled>HEADSET ON</button>
+          </div>
+          <div class="voice-row">
+            <label for="voice-mic-select">Micro</label>
+            <select id="voice-mic-select"></select>
+            <label for="voice-output-select">Sortie</label>
+            <select id="voice-output-select"></select>
+          </div>
+          <div class="voice-row">
+            <button id="voice-test-mic-btn">Tester micro</button>
+            <button id="voice-test-out-btn">Tester casque</button>
+            <div id="voice-meter" aria-label="Niveau micro" title="Niveau micro"></div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -239,6 +274,22 @@
     <div class="search-hint">Ctrl+K — Rechercher un utilisateur · Entrée pour ouvrir DM · Échap pour fermer</div>
     <input type="text" id="search-input" placeholder="Nom d'utilisateur…" autocomplete="off" spellcheck="false">
     <div id="search-results"></div>
+  </div>
+</div>
+
+<div id="create-channel-modal" style="display:none">
+  <div id="search-box">
+    <div class="search-hint">Créer un canal texte ou vocal</div>
+    <input type="text" id="create-channel-input" placeholder="Nom du canal (ex: general-2)" autocomplete="off" spellcheck="false">
+    <select id="create-channel-type">
+      <option value="text">Canal texte</option>
+      <option value="voice">Canal vocal</option>
+    </select>
+    <div id="create-channel-error" class="auth-error" style="display:none"></div>
+    <div style="display:flex; gap:8px; margin-top:10px;">
+      <button id="create-channel-cancel" type="button">Annuler</button>
+      <button id="create-channel-confirm" type="button">Créer</button>
+    </div>
   </div>
 </div>
 

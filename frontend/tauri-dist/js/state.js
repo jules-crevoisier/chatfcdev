@@ -35,6 +35,7 @@ const state = {
   // Channels
   channels:        ['general'],
   channelOwners:   new Map(),
+  channelKinds:    new Map([['general', 'text']]),
   activeChannel:   'general',
   channelMessages: new Map(),
   channelUnread:   new Map(),
@@ -45,6 +46,22 @@ const state = {
 
   // Custom emojis
   customEmojis: new Map(),
+
+  // Voice
+  voiceChannel: null,
+  voiceRoom: null,
+  voiceMembers: new Map(),
+  voiceSpeaking: new Map(),
+  voicePeers: new Map(),
+  voiceRemoteStreams: new Map(),
+  voiceAudioEls: new Map(),
+  voiceLocalStream: null,
+  voiceMuted: false,
+  voiceDeafened: false,
+  voiceGainByUser: new Map(),
+  voiceMicDeviceId: '',
+  voiceOutputDeviceId: '',
+  dmCallTarget: null,
 };
 
 export default state;

@@ -8,6 +8,7 @@ import { appendBanner } from './messages.js';
 import { restoreView } from './channels.js';
 import { openDm } from './dm.js';
 import { TOKEN_KEY } from './constants.js';
+import { restoreVoiceIfNeeded } from './voice.js';
 
 export const connectWS = (token) => {
   clearTimeout(state.reconnectTimer);
@@ -29,6 +30,8 @@ export const connectWS = (token) => {
       const dmPartner = restoreView();
       if (dmPartner) openDm(dmPartner);
     }
+    // Restore voice session after reload if the user was in a voice call.
+    restoreVoiceIfNeeded();
   };
   state.ws.onmessage = e => {
     let data;

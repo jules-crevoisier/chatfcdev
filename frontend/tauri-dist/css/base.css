@@ -32,6 +32,39 @@ html, body {
   outline-offset: 2px;
 }
 
+/* Ensure native selects are readable across all themes/platforms. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-color: var(--bg3);
+  color: var(--text);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  padding: 7px 30px 7px 10px;
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.2;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text2) 50%),
+    linear-gradient(135deg, var(--text2) 50%, transparent 50%);
+  background-position:
+    calc(100% - 16px) calc(50% - 2px),
+    calc(100% - 10px) calc(50% - 2px);
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+}
+
+select:hover {
+  border-color: var(--green);
+}
+
+select option,
+select optgroup {
+  background: var(--bg2);
+  color: var(--text);
+}
+
 /* Scrollbars */
 ::-webkit-scrollbar              { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track        { background: var(--bg); }

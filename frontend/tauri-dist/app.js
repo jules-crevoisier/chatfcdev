@@ -2,7 +2,7 @@
 
 import {
   emojiPicker, msgEmojiPicker, emojiMsgBtn, dmEmojiBtn,
-  gifPicker, gifBtn, dmGifBtn, autocomplete, messageInput,
+  gifPicker, gifBtn, dmGifBtn, autocomplete, messageInput, createChannelModal,
 } from './js/dom.js';
 
 import { initTheme } from './js/theme.js';
@@ -17,6 +17,7 @@ import { initGifPicker, closeGifPicker } from './js/gif.js';
 import { initUpload } from './js/upload.js';
 import { initSearch } from './js/search.js';
 import { initNotifications } from './js/notifications.js';
+import { initVoice } from './js/voice.js';
 
 // Close overlays on outside click
 document.addEventListener('click', e => {
@@ -25,6 +26,9 @@ document.addEventListener('click', e => {
   if (!gifPicker.contains(e.target) && e.target !== gifBtn && e.target !== dmGifBtn) closeGifPicker();
   if (!autocomplete.contains(e.target) && e.target !== messageInput) {
     autocomplete.style.display = 'none';
+  }
+  if (createChannelModal && e.target === createChannelModal) {
+    createChannelModal.style.display = 'none';
   }
 });
 
@@ -41,4 +45,5 @@ initGifPicker();
 initUpload();
 initSearch();
 initNotifications();
+initVoice();
 tryAutoLogin();
